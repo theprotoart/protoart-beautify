@@ -55,6 +55,13 @@ REMOTES: list[Remote] = [
     # Distilled few-step add-on (Latent Consistency LoRA) used by Turbo mode.
     Remote("lcm_lora", "latent-consistency/lcm-lora-sdv1-5", "pytorch_lora_weights.safetensors",
            "cf2fced511dbe7e26c8d1d397e728fbab875db4b", False, 135, optional=True),
+    # Face fix (optional): RestoreFormer (TencentARC GFPGAN v1.3.4 release, Apache-2.0) and CodeFormer
+    # (sczhou/CodeFormer v0.1.0 release, S-Lab License 1.0, non-commercial), from a Hugging Face mirror at a
+    # pinned commit. Both are byte-identical to the official GitHub release files (same SHA-256).
+    Remote("restoreformer", "fofr/comfyui", "facerestore_models/RestoreFormer.pth",
+           "173115bf2afcefcc7d6b27aedc681a5f5c9c8b0b", False, 278, optional=True),
+    Remote("codeformer", "fofr/comfyui", "facerestore_models/codeformer.pth",
+           "173115bf2afcefcc7d6b27aedc681a5f5c9c8b0b", False, 360, optional=True),
 ]
 
 
@@ -66,6 +73,8 @@ PINNED_SHA256 = {
     "lora_more_details": "d9cf2f88dec53a8dd8c09aba2b1d67963b265ebdf8255660f5bcd7f1c8edba33",
     "lora_sdxl_render": "672fcccf2ce6ca4ef71762a3ec1b8c8afd79328067e13c8f9756260ec94d1608",
     "lcm_lora": "8f90d840e075ff588a58e22c6586e2ae9a6f7922996ee6649a7f01072333afe4",
+    "restoreformer": "07404d446d62ca3d5ed38b1de09a947a1e77d46dbccec961a74d713a8f24ace0",
+    "codeformer": "1009e537e0c2a07d4cabce6355f53cb66767cd4b4297ec7a4a64ca4b8a5684b7",
 }
 
 

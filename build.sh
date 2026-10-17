@@ -20,7 +20,7 @@ done
 
 APP_NAME="ProtoArt Beautify"
 BUNDLE_ID="com.protoart.beautify"
-VERSION="1.1.0"
+VERSION="1.2.0"
 PY_VERSION="3.12"
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -108,7 +108,7 @@ cp -R "$PKGS" "$RES/site-packages"
 rm -f "$RES/site-packages/.requirements.sha"
 
 mkdir -p "$RES/engine"
-cp "$ROOT"/engine/*.py "$RES/engine/"
+cp "$ROOT"/engine/*.py "$ROOT"/engine/LICENSE-*.txt "$RES/engine/"
 
 # Sanity check: the engine imports (and, on Apple Silicon, sees the GPU). The Intel build is checked
 # under Rosetta when it's installed.
@@ -121,8 +121,17 @@ if [[ ${#RUN[@]} -gt 0 ]]; then
 "${RUN[@]}" -I - "$RES" <<'PY'
 import sys, platform; res = sys.argv[1]
 sys.path[:0] = [res + "/engine", res + "/site-packages"]
-import torch, refiners, spandrel, enhancer  # noqa
+import torch, refiners, spandrel, enhancer, face_fix  # noqa
 print(f"   {platform.machine()} · torch {torch.__version__} · MPS available: {torch.backends.mps.is_available()}")
+# Face fix networks build and run (random weights; the real ones are checked when first used).
+from codeformer_arch import CodeFormer
+from restoreformer_arch import RestoreFormer
+x = torch.zeros(1, 3, 512, 512)
+with torch.no_grad():
+    a = CodeFormer(dim_embd=512, codebook_size=1024, n_head=8, n_layers=9,
+                   connect_list=["32", "64", "128", "256"]).eval()(x, w=0.5, adain=True)[0]
+    b = RestoreFormer().eval()(x)[0]
+print(f"   face fix networks OK: CodeFormer {tuple(a.shape)}, RestoreFormer {tuple(b.shape)}")
 PY
 fi
 

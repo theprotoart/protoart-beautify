@@ -38,16 +38,31 @@ def emit(obj: dict) -> None:
 
 
 _enhancer = None
+_paths: dict = {}
+_face_fixer = None
 
 
 def get_enhancer(status):
     global _enhancer
     if _enhancer is None:
         from models import ensure_models
-        paths = ensure_models(status)
+        _paths.update(ensure_models(status))
         from enhancer import Enhancer
-        _enhancer = Enhancer(paths, status)
+        _enhancer = Enhancer(_paths, status)
     return _enhancer
+
+
+def get_face_fixer():
+    global _face_fixer
+    from models import DOWNLOADS, _verify
+    if _face_fixer is None:
+        from face_fix import FaceFixer
+        _face_fixer = FaceFixer(dict(_paths), _enhancer.device, _verify)
+    for key in ("restoreformer", "codeformer"):  # the app downloads these the first time they're used
+        p = DOWNLOADS / f"{key}.pth"
+        if p.exists():
+            _face_fixer.paths[key] = p
+    return _face_fixer
 
 
 def open_image(path: str):
@@ -85,7 +100,15 @@ def handle(req: dict) -> None:
         enh = get_enhancer(status)  # first call loads models (not counted in "seconds")
         t0 = time.time()
         image = open_image(req["input"])
-        result = enh.enhance(image, status, **(req.get("params") or {}))
+        params = dict(req.get("params") or {})
+        face = params.pop("face_fix", None)  # {"model", "strength", "fidelity", "faces": [[[x, y] * 5], ...]}
+        result = enh.enhance(image, status, **params)
+        faces_fixed = 0
+        if isinstance(face, dict) and face.get("faces"):
+            result, faces_fixed = get_face_fixer().fix(
+                result, face["faces"], model=str(face.get("model", "restoreformer")),
+                strength=float(face.get("strength", 0.8)), fidelity=float(face.get("fidelity", 0.5)),
+                status=lambda m, f: status(m, f))
         out = Path(req["output"])
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.suffix.lower() in (".jpg", ".jpeg"):
@@ -93,7 +116,8 @@ def handle(req: dict) -> None:
         else:
             result.save(out, format="PNG")
         emit({"id": rid, "event": "done", "output": str(out), "width": result.width,
-              "height": result.height, "seconds": round(time.time() - t0, 1)})
+              "height": result.height, "seconds": round(time.time() - t0, 1),
+              "faces_fixed": faces_fixed})
     else:
         emit({"id": rid, "event": "error", "message": f"unknown command {cmd!r}"})
 

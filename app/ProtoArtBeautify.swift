@@ -7,6 +7,7 @@ import CryptoKit
 import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
+import Vision
 
 // MARK: - Settings
 
@@ -99,6 +100,7 @@ struct QueueItem: Identifiable, Equatable {
     var seconds: Double?
     var savedURL: URL?          // where the result was last saved (copy or overwritten original)
     var filtersBaked = false    // detail filters were applied before the AI ran (already in the output)
+    var facesFixed: Int?        // Face Fix ran: how many faces it restored
 
     var name: String { url.lastPathComponent }
     var isFinished: Bool {
@@ -108,7 +110,7 @@ struct QueueItem: Identifiable, Equatable {
     static func == (a: QueueItem, b: QueueItem) -> Bool {
         a.id == b.id && a.state == b.state && a.fraction == b.fraction && a.eta == b.eta
             && a.message == b.message && a.outputURL == b.outputURL && a.thumbnail === b.thumbnail
-            && a.savedURL == b.savedURL && a.filtersBaked == b.filtersBaked
+            && a.savedURL == b.savedURL && a.filtersBaked == b.filtersBaked && a.facesFixed == b.facesFixed
     }
 }
 
@@ -510,6 +512,7 @@ struct ModelFile {
     let rev: String
     let fp16: Bool   // the engine converts these to fp16 once and keeps only that copy
     let mb: Int
+    var optional = false  // fetched only when a feature needs it (face fix), not at first launch
 
     var url: URL { URL(string: "https://huggingface.co/\(repo)/resolve/\(rev)/\(file)")! }
     var rawName: String { key + "." + (file as NSString).pathExtension }
@@ -537,6 +540,12 @@ enum ModelStore {
         // Turbo: distilled few-step add-on (Latent Consistency LoRA for SD 1.5).
         ModelFile(key: "lcm_lora", repo: "latent-consistency/lcm-lora-sdv1-5", file: "pytorch_lora_weights.safetensors",
                   rev: "cf2fced511dbe7e26c8d1d397e728fbab875db4b", fp16: false, mb: 135),
+        // Face fix, downloaded the first time it's used. Byte-identical to the official GitHub releases
+        // (TencentARC/GFPGAN v1.3.4 RestoreFormer.pth, sczhou/CodeFormer v0.1.0 codeformer.pth).
+        ModelFile(key: "restoreformer", repo: "fofr/comfyui", file: "facerestore_models/RestoreFormer.pth",
+                  rev: "173115bf2afcefcc7d6b27aedc681a5f5c9c8b0b", fp16: false, mb: 278, optional: true),
+        ModelFile(key: "codeformer", repo: "fofr/comfyui", file: "facerestore_models/codeformer.pth",
+                  rev: "173115bf2afcefcc7d6b27aedc681a5f5c9c8b0b", fp16: false, mb: 360, optional: true),
     ]
 
     /// SHA-256 of every file that is kept exactly as downloaded (checked against Hugging Face's own LFS
@@ -548,6 +557,8 @@ enum ModelStore {
         "lora_more_details": "d9cf2f88dec53a8dd8c09aba2b1d67963b265ebdf8255660f5bcd7f1c8edba33",
         "lora_sdxl_render": "672fcccf2ce6ca4ef71762a3ec1b8c8afd79328067e13c8f9756260ec94d1608",
         "lcm_lora": "8f90d840e075ff588a58e22c6586e2ae9a6f7922996ee6649a7f01072333afe4",
+        "restoreformer": "07404d446d62ca3d5ed38b1de09a947a1e77d46dbccec961a74d713a8f24ace0",
+        "codeformer": "1009e537e0c2a07d4cabce6355f53cb66767cd4b4297ec7a4a64ca4b8a5684b7",
     ]
 
     static func sha256(of url: URL) -> String? {
@@ -571,7 +582,51 @@ enum ModelStore {
         return fm.fileExists(atPath: downloads.appendingPathComponent(f.rawName).path)
     }
 
-    static var missing: [ModelFile] { files.filter { !isPresent($0) } }
+    static var missing: [ModelFile] { files.filter { !$0.optional && !isPresent($0) } }
+    static func faceModel(_ kind: String) -> ModelFile? { files.first { $0.key == kind } }
+}
+
+/// Finds faces with Apple's Vision framework and returns five landmarks per face (the two eyes, the nose tip
+/// and the two mouth corners, in the order the face-restore template expects) as fractions of the image size,
+/// origin top-left.
+enum FaceFinder {
+    static func landmarks(_ cg: CGImage) -> [[[Double]]] {
+        let request = VNDetectFaceLandmarksRequest()
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+        guard (try? handler.perform([request])) != nil else { return [] }
+        let W = Double(cg.width), H = Double(cg.height)
+        let size = CGSize(width: W, height: H)
+        func pts(_ r: VNFaceLandmarkRegion2D?) -> [CGPoint] {
+            (r?.pointsInImage(imageSize: size) ?? []).map { CGPoint(x: $0.x, y: H - $0.y) } // to top-left origin
+        }
+        func centre(_ p: [CGPoint]) -> CGPoint? {
+            p.isEmpty ? nil : CGPoint(x: p.map(\.x).reduce(0, +) / CGFloat(p.count),
+                                      y: p.map(\.y).reduce(0, +) / CGFloat(p.count))
+        }
+        var out: [[[Double]]] = []
+        for face in request.results ?? [] {
+            guard let lm = face.landmarks,
+                  var e1 = centre(pts(lm.leftPupil)) ?? centre(pts(lm.leftEye)),
+                  var e2 = centre(pts(lm.rightPupil)) ?? centre(pts(lm.rightEye)) else { continue }
+            let lips = pts(lm.outerLips)
+            guard let mouth = centre(lips) else { continue }
+            // Order the eyes like the template: going from eye 1 to eye 2, the mouth is on the clockwise side.
+            let eyeMid = CGPoint(x: (e1.x + e2.x) / 2, y: (e1.y + e2.y) / 2)
+            if (e2.x - e1.x) * (mouth.y - eyeMid.y) - (e2.y - e1.y) * (mouth.x - eyeMid.x) < 0 { swap(&e1, &e2) }
+            let ux = e2.x - e1.x, uy = e2.y - e1.y
+            // Mouth corners: the lip points furthest along the eye line in each direction.
+            func along(_ p: CGPoint) -> CGFloat { (p.x - mouth.x) * ux + (p.y - mouth.y) * uy }
+            guard let m1 = lips.min(by: { along($0) < along($1) }),
+                  let m2 = lips.max(by: { along($0) < along($1) }) else { continue }
+            // Nose tip: the nose-crest point furthest toward the mouth, else the nose's centre.
+            let dx = mouth.x - eyeMid.x, dy = mouth.y - eyeMid.y
+            let crest = pts(lm.noseCrest)
+            guard let nose = crest.max(by: { ($0.x * dx + $0.y * dy) < ($1.x * dx + $1.y * dy) })
+                    ?? centre(pts(lm.nose)) else { continue }
+            out.append([e1, e2, nose, m1, m2].map { [Double($0.x) / W, Double($0.y) / H] })
+        }
+        return out
+    }
 }
 
 /// Downloads the missing model files one by one with byte progress, ETA, retries and resume.
@@ -710,6 +765,13 @@ final class AppModel: ObservableObject {
     /// Monitor view: "single", "split" or "side".
     @Published var viewMode: String { didSet { defaults.set(viewMode, forKey: "viewMode") } }
 
+    // Face fix (runs after the enhance): RestoreFormer (default) or CodeFormer.
+    @Published var faceFix: Bool { didSet { defaults.set(faceFix, forKey: "faceFix"); if faceFix { prefetchFaceModel() } } }
+    @Published var faceModel: String { didSet { defaults.set(faceModel, forKey: "faceModel"); if faceFix { prefetchFaceModel() } } }
+    @Published var faceStrength: Double { didSet { defaults.set(faceStrength, forKey: "faceStrength") } }
+    @Published var faceFidelity: Double { didSet { defaults.set(faceFidelity, forKey: "faceFidelity") } }
+    private var faceWaiters: [(String?) -> Void] = []
+
     // Detail filters (Bleach Bypass, Dark Contrasts, Detail Extractor)
     @Published var filters = DetailFilters.load() { didSet { if filters != oldValue { filters.save(); refreshFiltered() } } }
     /// "after" = applied on top of the AI result; "before" = applied to the photo, then the AI enhances that.
@@ -775,6 +837,10 @@ final class AppModel: ObservableObject {
         filterStage = d.string(forKey: "filterStage") ?? "after"
         showFilters = d.object(forKey: "showFilters") as? Bool ?? true
         adjustCollapsed = d.bool(forKey: "adjustCollapsed")
+        faceFix = d.bool(forKey: "faceFix")
+        faceModel = d.string(forKey: "faceModel") ?? "restoreformer"
+        faceStrength = d.object(forKey: "faceStrength") as? Double ?? 0.8
+        faceFidelity = d.object(forKey: "faceFidelity") as? Double ?? 0.5
         let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0]
         outputFolder = d.string(forKey: "outputFolder").map { URL(fileURLWithPath: $0) }
             ?? pictures.appendingPathComponent("ProtoArt Beautify", isDirectory: true)
@@ -880,6 +946,38 @@ final class AppModel: ObservableObject {
             total += e
         }
         return total
+    }
+
+    // MARK: Face models (downloaded the first time Face Fix is used)
+
+    /// Start fetching the chosen face model in the background as soon as Face Fix is switched on.
+    private func prefetchFaceModel() {
+        guard engineReady, let f = ModelStore.faceModel(faceModel), !ModelStore.isPresent(f) else { return }
+        ensureFaceModel { _ in }
+    }
+
+    private func ensureFaceModel(_ done: @escaping (String?) -> Void) {
+        guard let f = ModelStore.faceModel(faceModel) else { done(nil); return }
+        if ModelStore.isPresent(f) { done(nil); return }
+        faceWaiters.append(done)
+        guard !downloader.isRunning else { return }
+        downloader.onProgress = { [weak self] msg, frac, eta in
+            guard let self else { return }
+            self.engineStatus = msg
+            self.engineFraction = frac
+            for i in self.items.indices where self.items[i].state == .queued && self.running {
+                self.items[i].message = "Downloading the face model (first use only)…"
+            }
+        }
+        downloader.onFinish = { [weak self] err in
+            guard let self else { return }
+            self.engineFraction = nil
+            self.engineStatus = self.engineReady ? "Ready" : self.engineStatus
+            let waiters = self.faceWaiters
+            self.faceWaiters = []
+            waiters.forEach { $0(err) }
+        }
+        downloader.start([f])
     }
 
     // MARK: Engine lifecycle
@@ -1091,6 +1189,20 @@ final class AppModel: ObservableObject {
             return
         }
         let item = items[i]
+        if faceFix, let fm = ModelStore.faceModel(faceModel), !ModelStore.isPresent(fm) {
+            let itemID = item.id
+            items[i].message = "Downloading the face model (first use only)…"
+            ensureFaceModel { [weak self] err in
+                guard let self else { return }
+                if let err {
+                    self.faceFix = false
+                    self.errorMessage = "Face Fix is off: " + err
+                    if let j = self.index(of: itemID) { self.items[j].message = "" }
+                }
+                self.pump()
+            }
+            return
+        }
         let out = outputPath(for: item)
         let id = UUID().uuidString
         jobID = id
@@ -1102,7 +1214,9 @@ final class AppModel: ObservableObject {
         items[i].message = "Starting…"
         items[i].outputURL = nil
         items[i].savedURL = nil
-        let params = settings.params(maxSide: maxSide)
+        var params = settings.params(maxSide: maxSide)
+        let face: [String: Any]? = faceFix
+            ? ["model": faceModel, "strength": faceStrength, "fidelity": faceFidelity] : nil
         let preFilter = filterStage == "before" && filters.anyOn
         items[i].filtersBaked = preFilter
         items[i].message = preFilter ? "Applying filters…" : "Preparing image…"
@@ -1112,8 +1226,10 @@ final class AppModel: ObservableObject {
         let f = filters, src = item.url, itemID = item.id
         DispatchQueue.global(qos: .userInitiated).async {
             var input: String?
+            var faces: [[[Double]]] = []
             if let cg = ImageIOHelpers.cgImage(src, maxPixel: 3072),
                let clean = preFilter ? DetailFilterEngine.render(f, cg) : DetailFilterEngine.toSRGB(cg) {
+                if face != nil { faces = FaceFinder.landmarks(clean) }
                 let tmp = Self.tempDir.appendingPathComponent("input-\(UUID().uuidString.prefix(8)).png")
                 if (try? DetailFilterEngine.write(clean, to: tmp, type: .png)) != nil { input = tmp.path }
             }
@@ -1126,6 +1242,10 @@ final class AppModel: ObservableObject {
                         }
                         self.finishItem()
                         return
+                    }
+                    if var face {
+                        face["faces"] = faces
+                        params["face_fix"] = face
                     }
                     self.engine.send(["id": id, "cmd": "enhance", "input": input, "output": out.path, "params": params])
                 }
@@ -1209,6 +1329,11 @@ final class AppModel: ObservableObject {
             items[i].outputSize = CGSize(width: w, height: h)
             items[i].seconds = secs
             items[i].message = "Done in \(Fmt.duration(secs))"
+            items[i].facesFixed = nil
+            if faceFix, let n = (msg["faces_fixed"] as? NSNumber)?.intValue {
+                items[i].facesFixed = n
+                items[i].message += n == 0 ? " · no faces found" : " · \(n) face\(n == 1 ? "" : "s") fixed"
+            }
             let mp = w * h / 1_000_000
             if mp > 0, secs > 0 {
                 let r = secs / mp, old = secondsPerMP[settings.rateKey]
@@ -1494,8 +1619,44 @@ final class AppModel: ObservableObject {
 
 // MARK: - Views
 
+/// Reports scroll-wheel and trackpad scrolls over its area (without blocking clicks or drags underneath).
+struct ScrollWheelCatcher: NSViewRepresentable {
+    /// delta > 0 = zoom in; precise = trackpad / Magic Mouse; point = pointer in this view, origin top-left.
+    var onScroll: (CGFloat, Bool, CGPoint) -> Void
+
+    func makeNSView(context: Context) -> CatcherView { CatcherView() }
+    func updateNSView(_ v: CatcherView, context: Context) { v.onScroll = onScroll }
+
+    final class CatcherView: NSView {
+        var onScroll: ((CGFloat, Bool, CGPoint) -> Void)?
+        private var monitor: Any?
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }   // clicks and drags pass through
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, let win = self.window, event.window === win, !self.isHiddenOrHasHiddenAncestor
+                else { return event }
+                let p = self.convert(event.locationInWindow, from: nil)
+                guard self.bounds.contains(p) else { return event }
+                var dy = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.scrollingDeltaX
+                if event.isDirectionInvertedFromDevice { dy = -dy }  // same feel with or without natural scrolling
+                guard dy != 0 else { return nil }
+                self.onScroll?(dy, event.hasPreciseScrollingDeltas, p)
+                return nil
+            }
+        }
+
+        deinit { if let m = monitor { NSEvent.removeMonitor(m) } }
+    }
+}
+
 /// Before/after viewer with zoom. All three views share one zoom level and position, so switching views
-/// keeps you on the same detail. Zoom: the − / FIT / 100% / 200% / + keys, or pinch on a trackpad; drag to
+/// keeps you on the same detail. Zoom: the scroll wheel (toward the pointer), the − / FIT / 100% / 200% / +
+/// keys, or pinch on a trackpad; drag to
 /// look around when zoomed in. "100%" shows one image pixel per screen pixel.
 struct CompareView: View {
     let before: NSImage
@@ -1525,6 +1686,11 @@ struct CompareView: View {
                     default: splitView(geo.size, scale: scale)
                     }
                 }
+                .overlay(ScrollWheelCatcher { delta, precise, point in
+                    // Smooth zoom toward the pointer: ~10% per wheel notch, finer for trackpads.
+                    let factor = exp(delta * (precise ? 0.01 : 0.1))
+                    zoomAt(scale * factor, point: point, size: geo.size, box: box, scale: scale, fit: fs)
+                })
                 .simultaneousGesture(MagnificationGesture()
                     .onChanged { m in
                         let base = pinchStart ?? scale
@@ -1557,6 +1723,24 @@ struct CompareView: View {
         let w = after.size.width * scale, h = after.size.height * scale
         let mx = max(0, (w - box.width) / 2), my = max(0, (h - box.height) / 2)
         return CGSize(width: min(mx, max(-mx, p.width)), height: min(my, max(-my, p.height)))
+    }
+
+    /// Zoom so the picture point under `point` (in this view's coordinates) stays under the pointer.
+    private func zoomAt(_ z: CGFloat, point: CGPoint, size: CGSize, box: CGSize, scale: CGFloat, fit: CGFloat) {
+        // In SIDE view both panels show the same picture: work in the panel the pointer is over.
+        var p = point
+        if mode == "side", p.x > box.width { p.x -= box.width + 10 }
+        let maxZ = max(oneToOne * 4, fit * 8)
+        let s2 = min(maxZ, max(fit, z))
+        guard abs(s2 - scale) > 0.0001 else { return }
+        if s2 <= fit * 1.001 { zoom = nil; pan = .zero; return }
+        let r = imageRect(box, scale: scale)
+        let ix = (p.x - r.minX) / scale, iy = (p.y - r.minY) / scale    // picture pixel under the pointer
+        let w2 = after.size.width * s2, h2 = after.size.height * s2
+        let newPan = CGSize(width: p.x - ix * s2 - (box.width - w2) / 2,
+                            height: p.y - iy * s2 - (box.height - h2) / 2)
+        zoom = s2
+        pan = clamped(newPan, scale: s2, box: box)
     }
 
     private func setZoom(_ z: CGFloat, fit: CGFloat) {
@@ -2070,6 +2254,7 @@ struct Knob: View {
     var help: String = ""
     var size: CGFloat = 1
     @State private var start: Double?
+    @Environment(\.isEnabled) private var isEnabled
 
     private var norm: Double {
         let span = range.upperBound - range.lowerBound
@@ -2096,6 +2281,8 @@ struct Knob: View {
                 .onEnded { _ in start = nil })
             LEDReadout(text: display(value), width: 58 * max(size, 0.85), size: size < 1 ? 10 : 11)
         }
+        .opacity(isEnabled ? 1 : 0.4)
+        .allowsHitTesting(isEnabled)
         .help(help)
     }
 }
@@ -2221,12 +2408,20 @@ struct OutlinedButtonStyle: ButtonStyle {
     let fill: Color
     let outline: Color
     let text: Color
+    var compact = false  // header-sized
 
     /// Light blue with a near-white outline.
     static let process = OutlinedButtonStyle(
         fill: Color(red: 0.56, green: 0.80, blue: 1.00),
         outline: Color(red: 0.96, green: 0.98, blue: 1.00),
         text: Color(red: 0.04, green: 0.14, blue: 0.30))
+
+    /// Warm brown with a tan outline (HOW TO).
+    static let help = OutlinedButtonStyle(
+        fill: Color(red: 0.55, green: 0.33, blue: 0.16),
+        outline: Color(red: 0.93, green: 0.72, blue: 0.45),
+        text: Color(red: 1.0, green: 0.95, blue: 0.86),
+        compact: true)
 
     /// Red with a bright orange outline.
     static let stop = OutlinedButtonStyle(
@@ -2248,9 +2443,10 @@ struct OutlinedButtonBody: View {
         let pressed = configuration.isPressed
         let shape = RoundedRectangle(cornerRadius: 7)
         configuration.label
-            .font(Console.label(18)).tracking(2)
+            .font(Console.label(style.compact ? 15 : 18)).tracking(style.compact ? 1.5 : 2)
             .foregroundStyle(style.text)
-            .padding(.horizontal, 22).padding(.top, 12).padding(.bottom, 9)
+            .padding(.horizontal, style.compact ? 16 : 22)
+            .padding(.top, style.compact ? 8 : 12).padding(.bottom, style.compact ? 6 : 9)
             .background(shape.fill(style.fill))
             // lens: lit from behind, glossy on top
             .overlay(shape.fill(LinearGradient(colors: [.white.opacity(0.45), .clear, .black.opacity(0.18)],
@@ -2312,11 +2508,17 @@ struct HeaderStrip: View {
                     .help("Choose name, folder and format (⇧⌘S)")
                 Button("FINDER") { model.reveal() }
                     .disabled(model.selected?.savedURL == nil && model.selected?.outputURL == nil)
-                Button("HOW TO") { model.showHelp = true }
-                    .help("How the app works and fixes for common problems (⌘?)")
             }
             .buttonStyle(MetalButtonStyle())
             Spacer(minLength: 10)
+            Button { model.showHelp = true } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "questionmark.circle.fill").font(.system(size: 15, weight: .bold))
+                    Text("HOW TO")
+                }
+            }
+            .buttonStyle(OutlinedButtonStyle.help)
+            .help("How the app works and fixes for common problems (⌘?)")
             HStack(spacing: 16) {
                 LED(color: Console.green, on: model.engineReady, label: "Ready")
                 LED(color: Console.amber, on: model.running || !model.engineReady, blink: true,
@@ -2397,6 +2599,7 @@ enum Guide: Equatable {
     case upscale, maxSize, memory, batch, format, saveTo, saveMode, save
     case filterStage, bleach, dark, extract, viewMode, filtersKey, light, color, grain
     case creativity, resemblance, hdr, steps, decay, solver, seed, prompt, negative
+    case faceFix, faceModel, faceStrength, faceFidelity, zoom
 
     var title: String {
         switch self {
@@ -2433,6 +2636,11 @@ enum Guide: Equatable {
         case .seed: return "Seed"
         case .prompt: return "Prompt"
         case .negative: return "Negative prompt"
+        case .faceFix: return "Face Fix"
+        case .faceModel: return "Face model"
+        case .faceStrength: return "Face strength"
+        case .faceFidelity: return "Fidelity (CodeFormer)"
+        case .zoom: return "Zoom"
         }
     }
 
@@ -2504,6 +2712,16 @@ enum Guide: Equatable {
             return "Words describing what you want. Usually leave it as is, or add hints like 'detailed skin, sharp eyes' for portraits or 'crisp foliage' for landscapes."
         case .negative:
             return "Things to avoid. The default steers away from blurry, low-quality artifacts."
+        case .faceFix:
+            return "Finds every face and restores it after the enhance: cleaner eyes, teeth and skin, fixing the warped faces AI detail can cause. Blended in with a soft edge. The first use downloads the face model once."
+        case .faceModel:
+            return "RESTORE (RestoreFormer): natural and faithful, the default. CODE (CodeFormer): stronger repair for blurry or damaged faces, with a Fidelity knob. CodeFormer's licence allows non-commercial use only."
+        case .faceStrength:
+            return "How much of the restored face is used. 100% = fully restored; lower blends back toward the enhanced face for a subtler, more natural result. 70–80% suits most photos."
+        case .faceFidelity:
+            return "CodeFormer only. Low (0.2–0.4): cleanest, prettiest face, but may look less like the person. High (0.7–1.0): keeps the person's own features. 0.5 is a good balance."
+        case .zoom:
+            return "Scroll the mouse wheel (or two fingers on a trackpad) over the picture to zoom smoothly toward the pointer; pinch works too. Drag to look around. FIT shows the whole picture."
         }
     }
 }
@@ -2783,6 +3001,42 @@ struct ControlsPanel: View {
                             .guide(.hdr)
                     }
                     .frame(maxWidth: .infinity)
+                }
+
+                Module(title: "Face Fix") {
+                    HStack(alignment: .top, spacing: 2) {
+                        VStack(spacing: 14) {
+                            ToggleSwitch(label: "Face Fix", off: "Off", on: "On", isOn: $model.faceFix,
+                                         help: "Restore faces after the enhance (first use downloads the face model)")
+                                .guide(.faceFix)
+                            VStack(spacing: 5) {
+                                EngravedLabel("Model", size: 11)
+                                HStack(spacing: 4) {
+                                    ForEach([("RESTORE", "restoreformer"), ("CODE", "codeformer")], id: \.1) { m in
+                                        Button { model.faceModel = m.1 } label: {
+                                            Text(m.0).font(Console.label(11)).tracking(0.6).frame(width: 56)
+                                        }
+                                        .buttonStyle(PresetKeyStyle(lit: model.faceModel == m.1))
+                                    }
+                                }
+                            }
+                            .guide(.faceModel)
+                        }
+                        Knob(label: "Strength", value: $model.faceStrength, range: 0...1, step: 0.05,
+                             display: { "\(Int(($0 * 100).rounded()))%" },
+                             help: "How much of the restored face is blended in.")
+                            .guide(.faceStrength)
+                        Knob(label: "Fidelity", value: $model.faceFidelity, range: 0...1, step: 0.05,
+                             display: { String(format: "%.2f", $0) },
+                             help: "CodeFormer only: higher keeps the person's own features, lower gives a cleaner face.")
+                            .disabled(model.faceModel != "codeformer")
+                            .guide(.faceFidelity)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .opacity(model.faceFix ? 1 : 0.75)
+                    EngravedLabel(model.faceModel == "codeformer"
+                                  ? "CodeFormer · non-commercial licence · 360 MB on first use"
+                                  : "RestoreFormer · 280 MB on first use", size: 10)
                 }
 
                 Module(title: "Advanced") {
@@ -3418,7 +3672,8 @@ struct MeterBridge: View {
             case .done:
                 let size = item.outputSize.map(Fmt.size) ?? ""
                 let saved = item.savedURL.map { " · saved: \($0.lastPathComponent)" } ?? ""
-                return "Done in \(Fmt.duration(item.seconds ?? 0)) · \(size)\(saved)"
+                let faces = item.facesFixed.map { $0 == 0 ? " · no faces found" : " · \($0) face\($0 == 1 ? "" : "s") fixed" } ?? ""
+                return "Done in \(Fmt.duration(item.seconds ?? 0)) · \(size)\(faces)\(saved)"
             case .failed(let m): return "Fault: \(m)"
             case .stopped: return "Stopped"
             case .cancelled: return "Cancelled"
@@ -3811,6 +4066,13 @@ enum HelpContent {
             "**Max Size**: caps the long side. Smaller is much faster; 768 px is quickest.",
             "**Memory**: 8 GB keeps work in small pieces so an 8 GB Mac doesn't run out of memory. Use 16 GB+ only on bigger Macs.",
         ]),
+        ("Face Fix", [
+            "Turn **Face Fix** on to restore faces after the enhance: it finds every face (with macOS's built-in face detection), repairs eyes, teeth and skin, and blends the result back in with a soft edge. Great for fixing faces the AI detail warped, and for old or blurry portraits.",
+            "**RESTORE** (RestoreFormer) is natural and faithful, and is the default. **CODE** (CodeFormer) repairs badly blurred or damaged faces more strongly. Its **Fidelity** knob trades a cleaner face (low) for keeping the person's own features (high, 0.7+).",
+            "**Strength** blends the restored face with the original: 70–80% looks the most natural.",
+            "The first time you use each model it downloads once (RestoreFormer about 280 MB, CodeFormer about 360 MB), checked against a fingerprint like the other models. CodeFormer's licence allows **non-commercial use only**.",
+            "It works with every preset, including INSTANT. Faces smaller than about 12 pixels between the eyes are left alone. The status line says how many faces were fixed.",
+        ]),
         ("Tone and Advanced knobs", [
             "**Creativity**: how much new detail the AI may invent (0.35 is the sweet spot).",
             "**Resemblance**: how strictly it follows the original's shapes. Higher = more faithful.",
@@ -3842,7 +4104,7 @@ enum HelpContent {
             "**SINGLE**: the result; click the picture to flip to the original and back.",
             "**SPLIT**: drag anywhere on the picture to move the divider (After on the left, Before on the right).",
             "**SIDE**: original and result side by side.",
-            "**Zoom** with the keys in the picture's corner: **FIT**, **100%** (one image pixel per screen pixel), **200%**, **+** and **−**, or pinch on a trackpad. Drag to look around while zoomed; in SPLIT, drag near the divider to move it. All three views keep the same zoom.",
+            "**Zoom** by scrolling the **mouse wheel** (or two fingers on a trackpad) over the picture: it zooms smoothly toward the pointer, up to 400% of actual pixels. Pinch works too, and the keys in the corner jump to **FIT**, **100%** (one image pixel per screen pixel) and **200%**. Drag to look around while zoomed; in SPLIT, drag near the divider to move it. All three views keep the same zoom.",
         ]),
     ]
 
@@ -3878,6 +4140,10 @@ enum HelpContent {
         ]),
         ("The result changed faces or text", [
             "Lower **Creativity** and raise **Resemblance**, or use **SUBTLE**. For logos and lettering use **INSTANT**.",
+        ]),
+        ("Face Fix didn't change anything", [
+            "The status says **no faces found** when macOS can't spot a face: very small, side-on, heavily covered or painted faces are often missed. Try a larger Max Size, or crop closer to the person.",
+            "If faces look too smooth or not like the person, lower **Strength**, or switch to **CODE** and raise **Fidelity**.",
         ]),
         ("Save says it can't overwrite", [
             "Some formats (for example camera RAW) can't be written. Switch Mode to **COPY** to save a new file instead.",

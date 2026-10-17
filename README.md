@@ -6,7 +6,8 @@ run on an **8 GB** Mac: no account, no cloud, no telemetry.
 
 Drop in an image → it's pre-upscaled 4× with ESRGAN, resized to your target size, then re-detailed tile by tile with
 Stable Diffusion 1.5 (Juggernaut Reborn) guided by a Tile ControlNet. Compare before/after (single, split or side by
-side, with zoom), finish it with Camera Raw-style Light/Color sliders and Color Efex-style filters, and save.
+side, with smooth mouse-wheel zoom), fix faces with **RestoreFormer** or **CodeFormer**, finish it with Camera
+Raw-style Light/Color sliders and Color Efex-style filters, and save.
 
 > **Models are not included.** The app downloads its models (~6 GB, once) from Hugging Face on first launch, and
 > **each model has its own licence**; some are non-commercial. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -164,10 +165,10 @@ Close memory-heavy apps (browsers with many tabs) for the smoothest runs.
 ## Sharing
 
 `Make Beautify DMG.command` packages `dist/ProtoArt Beautify.app` with an Applications link and
-`Read Me First.txt` into `dist/ProtoArt-Beautify-1.1.dmg` (+ SHA-256).
+`Read Me First.txt` into `dist/ProtoArt-Beautify-1.2.dmg` (+ SHA-256).
 
 **Intel Macs:** `Build Intel Version.command` (or `./build.sh --arch x86_64`) builds an x86_64 copy into
-`dist-intel/` from this Apple Silicon Mac and packages `ProtoArt-Beautify-1.1-Intel.dmg`. It runs the AI
+`dist-intel/` from this Apple Silicon Mac and packages `ProtoArt-Beautify-1.2-Intel.dmg`. It runs the AI
 on the CPU (PyTorch 2.2.2, the last Intel-Mac release; float32), starts on TURBO, and is much slower:
 INSTANT took ~2 min at 1024 px under Rosetta. `Build Both Versions.command` rebuilds both DMGs.
 PyTorch 2.2.2's `torch.load` weakness (CVE-2025-32434) is covered by SHA-256-pinning every pickle file

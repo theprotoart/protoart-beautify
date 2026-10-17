@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0 — 2026-10-17
+
+- **Face Fix:** restores faces after the enhance, with two models: **RestoreFormer** (default, natural and faithful)
+  and **CodeFormer** (stronger repair, with a Fidelity knob; non-commercial licence). Faces are found with macOS's
+  built-in Vision framework, aligned, restored, blended by Strength and pasted back with a feathered mask. Works with
+  every preset, including INSTANT. Each face model downloads once, the first time it's used, checked against a pinned
+  SHA-256 and loaded in PyTorch's weights-only mode.
+- **Smooth zoom:** the mouse wheel (or two-finger scroll) zooms continuously toward the pointer, no fixed steps.
+- **HOW TO** is now a large brown button beside the status lights.
+- The status line says how many faces were fixed.
+
 ## 1.1.0 — 2026-10-16
 
 - **Zoom** in the picture: FIT, 100% (actual pixels), 200%, + / −, pinch; drag to look around. Results load at full

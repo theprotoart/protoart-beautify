@@ -1,6 +1,6 @@
 #!/bin/bash
-# Packages the app into a disk image to share: dist/ProtoArt-Beautify-1.1.dmg
-# ("intel" argument: dist-intel/ProtoArt-Beautify-1.1-Intel.dmg)
+# Packages the app into a disk image to share: dist/ProtoArt-Beautify-1.2.dmg
+# ("intel" argument: dist-intel/ProtoArt-Beautify-1.2-Intel.dmg)
 cd "$(dirname "$0")"
 LOGF="dmg.log"; [[ "${1:-}" == "intel" ]] && LOGF="dmg-intel.log"
 exec > >(tee "$LOGF") 2>&1
@@ -27,7 +27,7 @@ ln -s /Applications "$STAGE/Applications"
 cp "Read Me First.txt" "$STAGE/"
 [[ -n "$SUFFIX" ]] && cp "Read Me First (Intel).txt" "$STAGE/" 2>/dev/null || true
 
-OUT="$DIST/ProtoArt-Beautify-1.1$SUFFIX.dmg"
+OUT="$DIST/ProtoArt-Beautify-1.2$SUFFIX.dmg"
 rm -f "$OUT"
 # a previously opened copy mounted under the same name makes hdiutil fail: eject it first
 for v in "/Volumes/ProtoArt Beautify"*; do [[ -d "$v" ]] && hdiutil detach "$v" -quiet -force 2>/dev/null || true; done
