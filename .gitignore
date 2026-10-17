@@ -1,0 +1,36 @@
+# build output (publish DMGs as GitHub Release files instead)
+.build/
+dist/
+dist-intel/
+*.dmg
+*.dmg.sha256
+*.app/
+
+# logs, benchmarks and local test files
+*.log
+bench*.py
+bench*.png
+*-test*.png
+test_input.png
+model_hashes.txt
+__pycache__/
+*.py[cod]
+
+# never commit keys, tokens or model weights
+.env
+.env.*
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.bin
+*.gguf
+
+# system and editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.bak
+*.orig
+*.zip

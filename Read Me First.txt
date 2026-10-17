@@ -1,0 +1,41 @@
+ProtoArt Beautify 1.1 — AI image enhancer for Apple Silicon Macs
+=================================================================
+
+WHAT YOU NEED
+  • A Mac with Apple Silicon (M1, M2, M3, M4…) and macOS 13 Ventura or newer
+  • About 10 GB of free disk space
+  • Internet for the first launch only (it downloads its AI models, about 6 GB, from huggingface.co)
+
+INSTALL
+  1. Drag "ProtoArt Beautify" onto the Applications folder in this window.
+  2. Open it from Applications.
+  3. macOS will say it can't verify the developer (the app is not from the App Store).
+     Click "Done", then open  System Settings › Privacy & Security, scroll down and click
+     "Open Anyway" next to ProtoArt Beautify, then confirm with your password or Touch ID.
+     You only need to do this once.
+     (Please don't turn off Gatekeeper or use Terminal tricks to skip this step.)
+
+FIRST LAUNCH
+  The app downloads and prepares its models (about 6 GB, 10–30 minutes depending on your
+  connection). The READY light turns green when it's done. After that it works offline.
+  If you use a firewall such as Little Snitch or LuLu, allow ProtoArt Beautify to connect
+  to huggingface.co.
+
+USING IT
+  Press HOW TO inside the app for a full guide. Quick version:
+  OPEN an image → pick a preset (TURBO is fast) → ENHANCE → compare with SINGLE / SPLIT / SIDE
+  → SAVE. The ADJUST panel has Light / Color sliders and Bleach Bypass, Dark Contrasts and
+  Detail Extractor and Film Grain filters (restack them with the arrows).
+
+PRIVACY
+  Everything runs on your Mac. Your images are never uploaded anywhere, and the app sends no
+  analytics. The only network use is downloading the AI models on first launch.
+
+UNINSTALL
+  Quit the app, drag it to the Trash, and delete the folder
+  ~/Library/Application Support/ProtoArt Beautify (the models, about 3 GB).
+
+NOTES
+  Models: Juggernaut Reborn (SD 1.5) and a Tile ControlNet (CreativeML OpenRAIL-M),
+  4x-UltraSharp (CC BY-NC-SA 4.0, non-commercial), LCM-LoRA (OpenRAIL++). Personal,
+  non-commercial use only.

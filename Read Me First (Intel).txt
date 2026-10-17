@@ -1,0 +1,18 @@
+ProtoArt Beautify — INTEL MAC VERSION
+=====================================
+
+This copy is for Intel Macs (for example a 2016–2020 MacBook Pro with a Core i5/i7).
+Install and first launch work exactly as described in "Read Me First.txt".
+
+WHAT TO EXPECT
+  Intel Macs don't have Apple's AI graphics chip, so the AI runs on the processor. It works,
+  but it's much slower than on an M-series Mac:
+    • INSTANT (sharpen only)  a few minutes (about 2 min for a 1024 px result in testing)
+    • TURBO                   roughly 15–30+ minutes per image  ← the app starts on this preset
+    • FAST / BALANCED / …     can take an hour or more
+  (Estimates: tested by running this Intel version on an M1 Mac; a real Core i5 may differ.)
+  Keep Max Size at 768 px, close other apps, and plug in the charger (it works the processor hard
+  and the fans will spin up). 16 GB of memory is recommended; 8 GB works but is slower.
+
+  The Light / Color sliders and the Bleach Bypass, Dark Contrasts, Detail Extractor and Film Grain
+  filters are instant on any Mac, and you can use them without running the AI at all.
