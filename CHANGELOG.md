@@ -8,21 +8,6 @@
 - **CodeFormer presets** for Face Fix, and a fix for a "no faces found" case.
 - **Bloom**: a Procreate-style glow filter for highlights.
 
-## Downloads
-
-| Mac | File |
-|---|---|
-| Apple Silicon (M1/M2/M3/M4) | `ProtoArt-Beautify-1.3.dmg` |
-| Intel | `ProtoArt-Beautify-1.3-Intel.dmg` |
-
-**SHA-256**
-```
-59d3cc071751054f1277e6a38d09367125a8fdacec2096883a28db8763d7fac8  ProtoArt-Beautify-1.3.dmg
-b8c913cd3d7d2f4e4f6e8abf0e6c34e19443743af6373494e253c2f47d5474ce  ProtoArt-Beautify-1.3-Intel.dmg
-```
-
-The app isn't signed by Apple yet: the first time, right-click it and choose **Open**. See *Read Me First* in the disk image.
-
 ## 1.2.0 — 2026-10-17
 
 - **Face Fix:** restores faces after the enhance, with two models: **RestoreFormer** (default, natural and faithful)
