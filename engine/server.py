@@ -104,6 +104,10 @@ def handle(req: dict) -> None:
         face = params.pop("face_fix", None)  # {"model", "strength", "fidelity", "faces": [[[x, y] * 5], ...]}
         result = enh.enhance(image, status, **params)
         faces_fixed = 0
+        if face is not None:  # one line in the app's log, to diagnose "no faces found"
+            n_in = len(face.get("faces") or []) if isinstance(face, dict) else -1
+            print(f"[face fix] {n_in} face(s) from the app; model={face.get('model') if isinstance(face, dict) else '?'} "
+                  f"strength={face.get('strength') if isinstance(face, dict) else '?'} result={result.size}", flush=True)
         if isinstance(face, dict) and face.get("faces"):
             result, faces_fixed = get_face_fixer().fix(
                 result, face["faces"], model=str(face.get("model", "restoreformer")),

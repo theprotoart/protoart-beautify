@@ -11,7 +11,7 @@ import Vision
 
 // MARK: - Settings
 
-struct EnhanceSettings: Equatable {
+struct EnhanceSettings: Equatable, Codable {
     var profile: String = ProcessInfo.processInfo.physicalMemory <= 9 * 1_073_741_824 ? "8gb" : "16gb"
     var prompt = "masterpiece, best quality, highres"
     var negativePrompt = "worst quality, low quality, normal quality"
@@ -25,6 +25,22 @@ struct EnhanceSettings: Equatable {
     var solver = "DDIM"
     var mode = "detail"        // "detail" = AI re-detailing, "instant" = 4× upscaler only
     var turbo = false          // distilled LCM add-on: ~2 passes, no negative-prompt pass
+    var likeness = 0.0         // 0 = off; IP-Adapter Plus strength (keeps the photo's people and things)
+
+    init() {}
+
+    /// Presets saved by an older version may lack newer fields: keep what's there, default the rest.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func v<T: Decodable>(_ k: CodingKeys, _ d: T) -> T { (try? c.decodeIfPresent(T.self, forKey: k)) ?? d }
+        let z = EnhanceSettings()
+        profile = v(.profile, z.profile); prompt = v(.prompt, z.prompt); negativePrompt = v(.negativePrompt, z.negativePrompt)
+        seed = v(.seed, z.seed); upscaleFactor = v(.upscaleFactor, z.upscaleFactor); resemblance = v(.resemblance, z.resemblance)
+        resemblanceDecay = v(.resemblanceDecay, z.resemblanceDecay); hdr = v(.hdr, z.hdr); creativity = v(.creativity, z.creativity)
+        steps = v(.steps, z.steps); solver = v(.solver, z.solver); mode = v(.mode, z.mode); turbo = v(.turbo, z.turbo)
+        likeness = v(.likeness, z.likeness)
+    }
+
     var rateKey: String { "\(profile)-\(mode)\(turbo ? "-turbo" : "")" }  // speed memory for estimates
 
     func params(maxSide: Int) -> [String: Any] {
@@ -45,6 +61,7 @@ struct EnhanceSettings: Equatable {
             "low_memory": true,
         ]
         if maxSide > 0 { p["max_output_side"] = maxSide }
+        if mode == "detail" && likeness > 0 { p["likeness"] = likeness }
         return p
     }
 
@@ -101,6 +118,7 @@ struct QueueItem: Identifiable, Equatable {
     var savedURL: URL?          // where the result was last saved (copy or overwritten original)
     var filtersBaked = false    // detail filters were applied before the AI ran (already in the output)
     var facesFixed: Int?        // Face Fix ran: how many faces it restored
+    var job: JobSnapshot?       // + QUEUE: the settings this row was queued with (nil = use the current ones)
 
     var name: String { url.lastPathComponent }
     var isFinished: Bool {
@@ -111,7 +129,33 @@ struct QueueItem: Identifiable, Equatable {
         a.id == b.id && a.state == b.state && a.fraction == b.fraction && a.eta == b.eta
             && a.message == b.message && a.outputURL == b.outputURL && a.thumbnail === b.thumbnail
             && a.savedURL == b.savedURL && a.filtersBaked == b.filtersBaked && a.facesFixed == b.facesFixed
+            && a.job == b.job
     }
+}
+
+/// Everything a run needs, frozen when the row was queued with + QUEUE (so you can try several settings).
+struct JobSnapshot: Equatable {
+    var settings: EnhanceSettings
+    var maxSide: Int
+    var faceFix: Bool
+    var faceModel: String
+    var faceStrength: Double
+    var faceFidelity: Double
+    var label: String
+}
+
+/// A preset you saved yourself (kept in the app's settings).
+struct UserPreset: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var settings: EnhanceSettings
+    var maxSide: Int
+    var faceFix: Bool
+    var faceModel: String
+    var faceStrength: Double
+    var faceFidelity: Double
+    var filters: DetailFilters?     // only when "include Adjust & filters" was ticked
+    var filterStage: String?
 }
 
 enum ImageIOHelpers {
@@ -209,21 +253,64 @@ struct DetailFilters: Codable, Equatable {
     var grainSize = 0.3         // 0…1 grain size
     var grainSoftness = 0.3     // 0…1 (hard … soft)
     var grainColor = false      // monochrome (false) or colour grain
+    // Bloom (like Procreate's): the bright parts of the picture spill soft light around themselves.
+    var bloomOn = false
+    var blAmount = 0.6          // 0…1 how strong the glow is
+    var blTransition = 0.4      // 0…1 how much of the picture counts as bright (low = only the brightest)
+    var blSize = 0.4            // 0…1 how far the light spreads
+    var blBurn = 0.0            // 0…1 screen (0) … adds light, can blow out (1)
     /// Stack order of the creative filters (top runs first). Light/Color always run before them.
     var order = DetailFilters.defaultOrder
-    static let defaultOrder = ["extract", "dark", "bleach", "grain"]
+    static let defaultOrder = ["extract", "dark", "bleach", "bloom", "grain"]
+
+    init() {}
+
+    /// Settings saved by an older version lack newer filters: keep everything that's there, default the rest.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func v<T: Decodable>(_ k: CodingKeys, _ d: T) -> T { (try? c.decodeIfPresent(T.self, forKey: k)) ?? d }
+        let z = DetailFilters()
+        exposure = v(.exposure, z.exposure); contrast = v(.contrast, z.contrast)
+        highlights = v(.highlights, z.highlights); shadows = v(.shadows, z.shadows)
+        whites = v(.whites, z.whites); blacks = v(.blacks, z.blacks)
+        temperature = v(.temperature, z.temperature); tint = v(.tint, z.tint)
+        vibrance = v(.vibrance, z.vibrance); saturation = v(.saturation, z.saturation)
+        bleachOn = v(.bleachOn, z.bleachOn); bbBrightness = v(.bbBrightness, z.bbBrightness)
+        bbSaturation = v(.bbSaturation, z.bbSaturation); bbContrast = v(.bbContrast, z.bbContrast)
+        bbLocalContrast = v(.bbLocalContrast, z.bbLocalContrast)
+        darkOn = v(.darkOn, z.darkOn); dcStrength = v(.dcStrength, z.dcStrength)
+        dcBrightness = v(.dcBrightness, z.dcBrightness); dcSaturation = v(.dcSaturation, z.dcSaturation)
+        extractOn = v(.extractOn, z.extractOn); deAmount = v(.deAmount, z.deAmount)
+        deContrast = v(.deContrast, z.deContrast); deSaturation = v(.deSaturation, z.deSaturation)
+        deRadius = v(.deRadius, z.deRadius)
+        grainOn = v(.grainOn, z.grainOn); grainAmount = v(.grainAmount, z.grainAmount)
+        grainSize = v(.grainSize, z.grainSize); grainSoftness = v(.grainSoftness, z.grainSoftness)
+        grainColor = v(.grainColor, z.grainColor)
+        bloomOn = v(.bloomOn, z.bloomOn); blAmount = v(.blAmount, z.blAmount)
+        blTransition = v(.blTransition, z.blTransition); blSize = v(.blSize, z.blSize); blBurn = v(.blBurn, z.blBurn)
+        order = DetailFilters.fullOrder(v(.order, z.order))
+    }
+
+    /// Adds filters a saved order doesn't know yet (new ones go before Film Grain when grain is last).
+    static func fullOrder(_ saved: [String]) -> [String] {
+        var o = saved.filter { defaultOrder.contains($0) }
+        o = o.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        for id in defaultOrder where !o.contains(id) {
+            if o.last == "grain" { o.insert(id, at: o.count - 1) } else { o.append(id) }
+        }
+        return o
+    }
 
     var lightOn: Bool { exposure != 0 || contrast != 0 || highlights != 0 || shadows != 0 || whites != 0 || blacks != 0 }
     var colorOn: Bool { temperature != 0 || tint != 0 || vibrance != 0 || saturation != 0 }
-    var anyOn: Bool { lightOn || colorOn || bleachOn || darkOn || extractOn || grainOn }
+    var anyOn: Bool { lightOn || colorOn || bleachOn || darkOn || extractOn || grainOn || (bloomOn && blAmount > 0) }
 
     mutating func resetLight() { exposure = 0; contrast = 0; highlights = 0; shadows = 0; whites = 0; blacks = 0 }
     mutating func resetColor() { temperature = 0; tint = 0; vibrance = 0; saturation = 0 }
 
     static func load() -> DetailFilters {
         guard let d = UserDefaults.standard.data(forKey: "detailFilters"),
-              var f = try? JSONDecoder().decode(DetailFilters.self, from: d) else { return DetailFilters() }
-        if Set(f.order) != Set(defaultOrder) || f.order.count != defaultOrder.count { f.order = defaultOrder }
+              let f = try? JSONDecoder().decode(DetailFilters.self, from: d) else { return DetailFilters() }
         return f
     }
 
@@ -315,6 +402,9 @@ enum DetailFilterEngine {
                     kCIInputContrastKey: max(0.25, 1.0 + 0.45 * f.bbContrast),
                     kCIInputBrightnessKey: 0.2 * f.bbBrightness])
                 img = localContrast(img, radius: 22, amount: 1.4 * f.bbLocalContrast)
+            case "bloom":
+                guard f.bloomOn, f.blAmount > 0 else { continue }
+                img = bloom(img, f, unit: unit, extent: ext)
             case "grain":
                 guard f.grainOn else { continue }
                 // Film grain: random noise blown up to the grain size (relative to the picture, so the
@@ -340,6 +430,54 @@ enum DetailFilterEngine {
             }
         }
         return img.cropped(to: ext)
+    }
+
+    /// Bloom (like Procreate's, same recipe as Protoart Studio's Adjust). Core Image works in linear light, so:
+    /// 1. pick the bright parts: each pixel's brightest channel through a soft threshold (Transition sets how
+    ///    much of the picture counts as bright), times the pixel;  2. blur them twice, a tight core and a
+    ///    3.5× wider halo (Size);  3. screen that light back on (never darkens), or with Burn add it, which
+    ///    can blow out to white.
+    static func bloom(_ img: CIImage, _ f: DetailFilters, unit: CGFloat, extent ext: CGRect) -> CIImage {
+        let t = min(1, max(0, f.blTransition))
+        let threshold = 0.92 - 0.7 * t, knee = 0.04 + 0.2 * t        // in display (gamma) values, as in Studio
+        let lo = pow(max(0, threshold - knee), 2.2), hi = pow(min(1, threshold + knee), 2.2)  // → linear
+        let span = max(1e-4, hi - lo)
+        // mask = smoothstep(lo, hi, max(r, g, b))
+        var mask = img.applyingFilter("CIMaximumComponent")
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: 1 / span, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: 1 / span, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: 1 / span, w: 0),
+                "inputBiasVector": CIVector(x: -lo / span, y: -lo / span, z: -lo / span, w: 0)])
+            .applyingFilter("CIColorClamp", parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)])
+        mask = mask.applyingFilter("CIToneCurve", parameters: [   // smooth the ramp's ends (smoothstep)
+            "inputPoint0": CIVector(x: 0, y: 0), "inputPoint1": CIVector(x: 0.25, y: 0.156),
+            "inputPoint2": CIVector(x: 0.5, y: 0.5), "inputPoint3": CIVector(x: 0.75, y: 0.844),
+            "inputPoint4": CIVector(x: 1, y: 1)])
+        let pick = img.applyingFilter("CIMultiplyCompositing", parameters: [kCIInputBackgroundImageKey: mask])
+            .clampedToExtent()
+        let r = (4 + 56 * min(1, max(0, f.blSize))) * unit
+        let burn = min(1, max(0, f.blBurn))
+        let gain = f.blAmount * (1.6 + 4.0 * burn)
+        func scaled(_ i: CIImage, _ k: Double) -> CIImage {
+            i.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: k, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: k, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: k, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)])
+        }
+        let near = scaled(pick.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: r]), 0.6 * gain)
+        let far = scaled(pick.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: r * 3.5]), 0.8 * gain)
+        let light = near.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: far])
+            .cropped(to: ext)
+        let lightClamped = light.applyingFilter("CIColorClamp", parameters: [
+            "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 1),
+            "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)])
+        let screen = lightClamped.applyingFilter("CIScreenBlendMode", parameters: [kCIInputBackgroundImageKey: img])
+        guard burn > 0.001 else { return screen.cropped(to: ext) }
+        let added = light.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: img])
+        return screen.applyingFilter("CIDissolveTransition", parameters: [
+            kCIInputTargetImageKey: added, kCIInputTimeKey: burn]).cropped(to: ext)
     }
 
     private static func rgbSpace(_ space: CGColorSpace?) -> CGColorSpace {
@@ -546,6 +684,12 @@ enum ModelStore {
                   rev: "173115bf2afcefcc7d6b27aedc681a5f5c9c8b0b", fp16: false, mb: 278, optional: true),
         ModelFile(key: "codeformer", repo: "fofr/comfyui", file: "facerestore_models/codeformer.pth",
                   rev: "173115bf2afcefcc7d6b27aedc681a5f5c9c8b0b", fp16: false, mb: 360, optional: true),
+        // Likeness lock, downloaded the first time it's used: IP-Adapter Plus SD 1.5 and the OpenCLIP ViT-H
+        // image encoder, as converted and published by refiners.
+        ModelFile(key: "ip_plus", repo: "refiners/sd15.ip_adapter.plus", file: "model.safetensors",
+                  rev: "2516bc6c2cbd933e7949f7c2c0f076790ff3bf35", fp16: false, mb: 94, optional: true),
+        ModelFile(key: "clip_image_h", repo: "refiners/sd21.unclip.image_encoder", file: "model.safetensors",
+                  rev: "4a36eec8c6fcfa9911a9b3290c707b8ad7591cc3", fp16: false, mb: 1206, optional: true),
     ]
 
     /// SHA-256 of every file that is kept exactly as downloaded (checked against Hugging Face's own LFS
@@ -559,6 +703,8 @@ enum ModelStore {
         "lcm_lora": "8f90d840e075ff588a58e22c6586e2ae9a6f7922996ee6649a7f01072333afe4",
         "restoreformer": "07404d446d62ca3d5ed38b1de09a947a1e77d46dbccec961a74d713a8f24ace0",
         "codeformer": "1009e537e0c2a07d4cabce6355f53cb66767cd4b4297ec7a4a64ca4b8a5684b7",
+        "ip_plus": "6eae5d2098fa83e3b8bf416fb46dd77a921ad044650f13890e8d41d7c84a71d2",
+        "clip_image_h": "c9f43e359e06f1a237324c4c11734d6acd7fbddbfd3b1ed4f1b525267bedb812",
     ]
 
     static func sha256(of url: URL) -> String? {
@@ -584,6 +730,19 @@ enum ModelStore {
 
     static var missing: [ModelFile] { files.filter { !$0.optional && !isPresent($0) } }
     static func faceModel(_ kind: String) -> ModelFile? { files.first { $0.key == kind } }
+}
+
+/// One-click CodeFormer settings (the same as Protoart Studio's FACE_PRESETS).
+struct FacePreset: Identifiable {
+    let id: String, label: String, fidelity: Double, strength: Double, tip: String
+    static let all: [FacePreset] = [
+        FacePreset(id: "balanced", label: "BALANCED", fidelity: 0.5, strength: 1.0, tip: "Good default for most portraits"),
+        FacePreset(id: "identity", label: "LIKENESS", fidelity: 0.8, strength: 1.0, tip: "Keeps the likeness of a real person"),
+        FacePreset(id: "heavy", label: "HEAVY", fidelity: 0.3, strength: 1.0, tip: "Fixes badly distorted or tiny faces (small faces in wide shots)"),
+        FacePreset(id: "subtle", label: "SUBTLE", fidelity: 0.7, strength: 0.6, tip: "Light clean-up blended with the original, so skin texture survives"),
+        FacePreset(id: "old", label: "OLD PHOTO", fidelity: 0.4, strength: 1.0, tip: "Scanned or worn photographs"),
+        FacePreset(id: "gentle", label: "GENTLE", fidelity: 0.85, strength: 1.0, tip: "Faces that are already clear and just need a polish"),
+    ]
 }
 
 /// Finds faces with Apple's Vision framework and returns five landmarks per face (the two eyes, the nose tip
@@ -764,6 +923,12 @@ final class AppModel: ObservableObject {
     @Published var saveMode: String { didSet { defaults.set(saveMode, forKey: "saveMode") } }
     /// Monitor view: "single", "split" or "side".
     @Published var viewMode: String { didSet { defaults.set(viewMode, forKey: "viewMode") } }
+    /// Save every finished result straight to the save folder (copy mode), so nothing waits in a temp folder.
+    @Published var autoSaveResults: Bool { didSet { defaults.set(autoSaveResults, forKey: "autoSaveResults") } }
+    /// Your own presets (Presets → MY PRESETS).
+    @Published var userPresets: [UserPreset] = [] {
+        didSet { if let d = try? JSONEncoder().encode(userPresets) { defaults.set(d, forKey: "userPresets") } }
+    }
 
     // Face fix (runs after the enhance): RestoreFormer (default) or CodeFormer.
     @Published var faceFix: Bool { didSet { defaults.set(faceFix, forKey: "faceFix"); if faceFix { prefetchFaceModel() } } }
@@ -839,11 +1004,19 @@ final class AppModel: ObservableObject {
         adjustCollapsed = d.bool(forKey: "adjustCollapsed")
         faceFix = d.bool(forKey: "faceFix")
         faceModel = d.string(forKey: "faceModel") ?? "restoreformer"
-        faceStrength = d.object(forKey: "faceStrength") as? Double ?? 0.8
+        // 0% would skip every face (and looked like "no faces found"): the knob starts at 10%, like Studio's slider.
+        faceStrength = max(0.1, d.object(forKey: "faceStrength") as? Double ?? 0.8)
+        if (d.object(forKey: "faceStrength") as? Double ?? 0.8) < 0.1 { faceStrength = 0.8 }
         faceFidelity = d.object(forKey: "faceFidelity") as? Double ?? 0.5
         let pictures = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0]
+        // Default save folder: the Desktop, where results are easy to find (change it with the Save To tape).
         outputFolder = d.string(forKey: "outputFolder").map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
             ?? pictures.appendingPathComponent("ProtoArt Beautify", isDirectory: true)
+        autoSaveResults = d.object(forKey: "autoSaveResults") as? Bool ?? true
+        if let data = d.data(forKey: "userPresets"), let list = try? JSONDecoder().decode([UserPreset].self, from: data) {
+            userPresets = list
+        }
         engine.onMessage = { [weak self] msg in self?.handle(msg) }
         engine.onExit = { [weak self] code in self?.engineExited(code) }
         #if arch(x86_64)
@@ -877,6 +1050,7 @@ final class AppModel: ObservableObject {
     }
 
     private func settingsChanged() {
+        if settings.likeness > 0 && settings.mode == "detail" { prefetchOptional() }
         guard !applyingPreset, let snap = presetSnapshot else { return }
         let s = settings
         let aiMoved = s.creativity != snap.creativity || s.resemblance != snap.resemblance || s.hdr != snap.hdr
@@ -928,8 +1102,9 @@ final class AppModel: ObservableObject {
 
     /// Estimated seconds for an item that hasn't started, from what earlier runs took.
     func estimate(_ item: QueueItem) -> Double? {
-        guard let rate = secondsPerMP[settings.rateKey] else { return nil }
-        let out = settings.predictedOutput(for: item.inputSize, maxSide: maxSide)
+        let s = item.job?.settings ?? settings, side = item.job?.maxSide ?? maxSide
+        guard let rate = secondsPerMP[s.rateKey] else { return nil }
+        let out = s.predictedOutput(for: item.inputSize, maxSide: side)
         return rate * Double(out.width * out.height) / 1_000_000
     }
 
@@ -951,14 +1126,25 @@ final class AppModel: ObservableObject {
     // MARK: Face models (downloaded the first time Face Fix is used)
 
     /// Start fetching the chosen face model in the background as soon as Face Fix is switched on.
-    private func prefetchFaceModel() {
-        guard engineReady, let f = ModelStore.faceModel(faceModel), !ModelStore.isPresent(f) else { return }
-        ensureFaceModel { _ in }
+    private func prefetchFaceModel() { prefetchOptional() }
+
+    /// Optional models the current settings need (face model, Likeness) that aren't on disk yet.
+    private func missingOptional(face: Bool, faceKind: String, likeness: Double, mode: String) -> [ModelFile] {
+        var keys: [String] = []
+        if face { keys.append(faceKind) }
+        if likeness > 0 && mode == "detail" { keys += ["ip_plus", "clip_image_h"] }
+        return keys.compactMap { ModelStore.faceModel($0) }.filter { !ModelStore.isPresent($0) }
     }
 
-    private func ensureFaceModel(_ done: @escaping (String?) -> Void) {
-        guard let f = ModelStore.faceModel(faceModel) else { done(nil); return }
-        if ModelStore.isPresent(f) { done(nil); return }
+    private func prefetchOptional() {
+        guard engineReady else { return }
+        let files = missingOptional(face: faceFix, faceKind: faceModel, likeness: settings.likeness, mode: settings.mode)
+        if !files.isEmpty { ensureOptional(files) { _ in } }
+    }
+
+    private func ensureOptional(_ files: [ModelFile], _ done: @escaping (String?) -> Void) {
+        let need = files.filter { !ModelStore.isPresent($0) }
+        if need.isEmpty { done(nil); return }
         faceWaiters.append(done)
         guard !downloader.isRunning else { return }
         downloader.onProgress = { [weak self] msg, frac, eta in
@@ -966,7 +1152,7 @@ final class AppModel: ObservableObject {
             self.engineStatus = msg
             self.engineFraction = frac
             for i in self.items.indices where self.items[i].state == .queued && self.running {
-                self.items[i].message = "Downloading the face model (first use only)…"
+                self.items[i].message = "Downloading an add-on model (first use only)…"
             }
         }
         downloader.onFinish = { [weak self] err in
@@ -977,7 +1163,7 @@ final class AppModel: ObservableObject {
             self.faceWaiters = []
             waiters.forEach { $0(err) }
         }
-        downloader.start([f])
+        downloader.start(need)
     }
 
     // MARK: Engine lifecycle
@@ -1189,15 +1375,20 @@ final class AppModel: ObservableObject {
             return
         }
         let item = items[i]
-        if faceFix, let fm = ModelStore.faceModel(faceModel), !ModelStore.isPresent(fm) {
+        let job = item.job ?? snapshot(label: "")
+        let needed = missingOptional(face: job.faceFix, faceKind: job.faceModel, likeness: job.settings.likeness,
+                                     mode: job.settings.mode)
+        if !needed.isEmpty {
             let itemID = item.id
-            items[i].message = "Downloading the face model (first use only)…"
-            ensureFaceModel { [weak self] err in
+            items[i].message = "Downloading an add-on model (first use only)…"
+            ensureOptional(needed) { [weak self] err in
                 guard let self else { return }
                 if let err {
-                    self.faceFix = false
-                    self.errorMessage = "Face Fix is off: " + err
-                    if let j = self.index(of: itemID) { self.items[j].message = "" }
+                    if let j = self.index(of: itemID) {
+                        self.items[j].state = .failed("Couldn't download an add-on model: " + err)
+                        self.items[j].message = ""
+                    }
+                    self.errorMessage = "Couldn't download an add-on model (Face Fix or Likeness): " + err
                 }
                 self.pump()
             }
@@ -1214,9 +1405,9 @@ final class AppModel: ObservableObject {
         items[i].message = "Starting…"
         items[i].outputURL = nil
         items[i].savedURL = nil
-        var params = settings.params(maxSide: maxSide)
-        let face: [String: Any]? = faceFix
-            ? ["model": faceModel, "strength": faceStrength, "fidelity": faceFidelity] : nil
+        var params = job.settings.params(maxSide: job.maxSide)
+        let face: [String: Any]? = job.faceFix
+            ? ["model": job.faceModel, "strength": job.faceStrength, "fidelity": job.faceFidelity] : nil
         let preFilter = filterStage == "before" && filters.anyOn
         items[i].filtersBaked = preFilter
         items[i].message = preFilter ? "Applying filters…" : "Preparing image…"
@@ -1246,6 +1437,9 @@ final class AppModel: ObservableObject {
                     if var face {
                         face["faces"] = faces
                         params["face_fix"] = face
+                        if let j = self.index(of: itemID) {
+                            self.items[j].message = faces.isEmpty ? "No face found to fix" : "Found \(faces.count) face\(faces.count == 1 ? "" : "s")"
+                        }
                     }
                     self.engine.send(["id": id, "cmd": "enhance", "input": input, "output": out.path, "params": params])
                 }
@@ -1330,7 +1524,7 @@ final class AppModel: ObservableObject {
             items[i].seconds = secs
             items[i].message = "Done in \(Fmt.duration(secs))"
             items[i].facesFixed = nil
-            if faceFix, let n = (msg["faces_fixed"] as? NSNumber)?.intValue {
+            if (items[i].job?.faceFix ?? faceFix), let n = (msg["faces_fixed"] as? NSNumber)?.intValue {
                 items[i].facesFixed = n
                 items[i].message += n == 0 ? " · no faces found" : " · \(n) face\(n == 1 ? "" : "s") fixed"
             }
@@ -1340,7 +1534,7 @@ final class AppModel: ObservableObject {
                 secondsPerMP[settings.rateKey] = old.map { 0.5 * $0 + 0.5 * r } ?? r
             }
             if items[i].id == selectedID { loadPreview() }
-            if batchMode { autoSave(items[i].id) }
+            if batchMode || (autoSaveResults && saveMode == "copy") { autoSave(items[i].id) }
             finishItem()
         case "error":
             items[i].state = .failed(msg["message"] as? String ?? "Unknown error")
@@ -1452,8 +1646,13 @@ final class AppModel: ObservableObject {
 
     private func copyURL(for item: QueueItem) -> URL {
         try? FileManager.default.createDirectory(at: outputFolder, withIntermediateDirectories: true)
-        return uniqueURL(in: outputFolder, base: item.url.deletingPathExtension().lastPathComponent + "-beautify",
-                         ext: saveExt)
+        var base = item.url.deletingPathExtension().lastPathComponent + "-beautify"
+        if let label = item.job?.label, !label.isEmpty {
+            let slug = label.lowercased().map { $0.isLetter || $0.isNumber ? String($0) : "-" }.joined()
+                .split(separator: "-").joined(separator: "-")
+            if !slug.isEmpty { base += "-" + String(slug.prefix(40)) }
+        }
+        return uniqueURL(in: outputFolder, base: base, ext: saveExt)
     }
 
     /// Ask before replacing originals (can be turned off with "Don't ask again").
@@ -1591,6 +1790,149 @@ final class AppModel: ObservableObject {
     func openOutputFolder() {
         try? FileManager.default.createDirectory(at: outputFolder, withIntermediateDirectories: true)
         NSWorkspace.shared.open(outputFolder)
+    }
+
+    // MARK: Trying settings (+ QUEUE) and your own presets
+
+    /// What the current knobs would run, frozen.
+    func snapshot(label: String) -> JobSnapshot {
+        JobSnapshot(settings: settings, maxSide: maxSide, faceFix: faceFix, faceModel: faceModel,
+                    faceStrength: faceStrength, faceFidelity: faceFidelity, label: label)
+    }
+
+    /// Short name for the current settings: the lit preset, else a summary of the knobs.
+    var settingsLabel: String {
+        if let u = userPresets.first(where: { userPresetMatches($0) }) { return u.name }
+        if let p = activePreset { return p + (settings.likeness > 0 ? " +likeness" : "") + (faceFix ? " +face" : "") }
+        let s = settings
+        if s.mode == "instant" { return "INSTANT" }
+        var parts = [String(format: "C%.2f R%.2f", s.creativity, s.resemblance)]
+        if s.turbo { parts.append("turbo") }
+        if s.likeness > 0 { parts.append(String(format: "L%.0f%%", s.likeness * 100)) }
+        if faceFix { parts.append(faceModel == "codeformer" ? "CF" : "RF") }
+        return parts.joined(separator: " ")
+    }
+
+    /// + QUEUE: adds the selected photo again with the current settings, so you can queue several versions
+    /// (change knobs, + QUEUE, change again, + QUEUE …) and run them all with ENHANCE.
+    func queueVariation() {
+        guard let src = selected ?? items.last else { errorMessage = "Open a photo first."; return }
+        if !batchMode { batchMode = true }
+        // The photo you opened is waiting to run with the live knobs: the first + QUEUE gives it these settings
+        // instead of adding a second, unlabelled run.
+        if src.state == .queued, src.job == nil, let i = index(of: src.id) {
+            items[i].job = snapshot(label: settingsLabel)
+            updateDockBadge()
+            return
+        }
+        var row = QueueItem(url: src.url)
+        row.thumbnail = src.thumbnail
+        row.inputSize = src.inputSize
+        row.job = snapshot(label: settingsLabel)
+        items.append(row)
+        if running { runTotal += 1 }
+        if src.inputSize == .zero { loadMetadata(row.id, url: row.url) }
+        updateDockBadge()
+        pump()
+    }
+
+    /// Puts a queued row's settings back on the knobs.
+    func useSettings(of id: QueueItem.ID) {
+        guard let job = items.first(where: { $0.id == id })?.job else { return }
+        let profile = settings.profile
+        settings = job.settings
+        settings.profile = profile
+        maxSide = job.maxSide
+        faceFix = job.faceFix; faceModel = job.faceModel
+        faceStrength = job.faceStrength; faceFidelity = job.faceFidelity
+        syncPreset()
+    }
+
+    func userPresetMatches(_ u: UserPreset) -> Bool {
+        var a = u.settings, b = settings
+        a.profile = ""; b.profile = ""
+        guard a == b, u.maxSide == maxSide, u.faceFix == faceFix else { return false }
+        if faceFix, u.faceModel != faceModel || abs(u.faceStrength - faceStrength) > 0.001
+            || abs(u.faceFidelity - faceFidelity) > 0.001 { return false }
+        if let f = u.filters, f != filters { return false }
+        return true
+    }
+
+    func applyUserPreset(_ u: UserPreset) {
+        let profile = settings.profile
+        applyingPreset = true
+        settings = u.settings
+        settings.profile = profile  // the Memory switch belongs to this Mac, not to the preset
+        maxSide = u.maxSide
+        faceFix = u.faceFix; faceModel = u.faceModel
+        faceStrength = u.faceStrength; faceFidelity = u.faceFidelity
+        if let f = u.filters { filters = f }
+        if let st = u.filterStage { filterStage = st }
+        applyingPreset = false
+        syncPreset()
+    }
+
+    private func makeUserPreset(name: String, includeFilters: Bool, id: UUID = UUID()) -> UserPreset {
+        UserPreset(id: id, name: name, settings: settings, maxSide: maxSide, faceFix: faceFix, faceModel: faceModel,
+                   faceStrength: faceStrength, faceFidelity: faceFidelity,
+                   filters: includeFilters ? filters : nil, filterStage: includeFilters ? filterStage : nil)
+    }
+
+    /// Asks for a name (and whether to include Adjust & filters), then saves the current settings.
+    func saveUserPreset() {
+        let alert = NSAlert()
+        alert.messageText = "Save these settings as a preset"
+        alert.informativeText = "Keeps the AI knobs, Upscale, Max Size and Face Fix. The Memory switch isn't saved."
+        let field = NSTextField(frame: NSRect(x: 0, y: 26, width: 260, height: 24))
+        field.placeholderString = "Preset name"
+        field.stringValue = activePreset.map { "My " + $0.capitalized } ?? "My preset \(userPresets.count + 1)"
+        let check = NSButton(checkboxWithTitle: "Include Adjust & filters", target: nil, action: nil)
+        check.frame = NSRect(x: 0, y: 0, width: 260, height: 20)
+        check.state = filters.anyOn ? .on : .off
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 52))
+        box.addSubview(field); box.addSubview(check)
+        alert.accessoryView = box
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let include = check.state == .on
+        if let i = userPresets.firstIndex(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            userPresets[i] = makeUserPreset(name: userPresets[i].name, includeFilters: include, id: userPresets[i].id)
+        } else {
+            userPresets.append(makeUserPreset(name: name, includeFilters: include))
+        }
+    }
+
+    func updateUserPreset(_ u: UserPreset) {
+        guard let i = userPresets.firstIndex(where: { $0.id == u.id }) else { return }
+        userPresets[i] = makeUserPreset(name: u.name, includeFilters: u.filters != nil, id: u.id)
+    }
+
+    func renameUserPreset(_ u: UserPreset) {
+        guard let i = userPresets.firstIndex(where: { $0.id == u.id }) else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename preset"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = u.name
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { userPresets[i].name = name }
+    }
+
+    func deleteUserPreset(_ u: UserPreset) {
+        let alert = NSAlert()
+        alert.messageText = "Delete the preset “\(u.name)”?"
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        userPresets.removeAll { $0.id == u.id }
     }
 
     // MARK: Helpers
@@ -2597,9 +2939,9 @@ struct TapeField: View {
 enum Guide: Equatable {
     case instant, turbo, fast, balanced, quality, subtle, creative
     case upscale, maxSize, memory, batch, format, saveTo, saveMode, save
-    case filterStage, bleach, dark, extract, viewMode, filtersKey, light, color, grain
+    case filterStage, bleach, dark, extract, viewMode, filtersKey, light, color, grain, bloom, facePreset
     case creativity, resemblance, hdr, steps, decay, solver, seed, prompt, negative
-    case faceFix, faceModel, faceStrength, faceFidelity, zoom
+    case faceFix, faceModel, faceStrength, faceFidelity, zoom, likeness, myPresets, addQueue, autoSave
 
     var title: String {
         switch self {
@@ -2626,6 +2968,8 @@ enum Guide: Equatable {
         case .filtersKey: return "Adjust panel"
         case .light: return "Light"
         case .grain: return "Film Grain"
+        case .bloom: return "Bloom"
+        case .facePreset: return "Face presets"
         case .color: return "Color"
         case .creativity: return "Creativity"
         case .resemblance: return "Resemblance"
@@ -2641,6 +2985,10 @@ enum Guide: Equatable {
         case .faceStrength: return "Face strength"
         case .faceFidelity: return "Fidelity (CodeFormer)"
         case .zoom: return "Zoom"
+        case .likeness: return "Likeness"
+        case .myPresets: return "My presets"
+        case .addQueue: return "+ Queue"
+        case .autoSave: return "Auto-save"
         }
     }
 
@@ -2685,7 +3033,11 @@ enum Guide: Equatable {
         case .extract:
             return "Detail Extractor: pulls out texture everywhere for an HDR-like, illustrated look. Radius: FINE for small texture, COARSE for big shapes."
         case .filtersKey:
-            return "Shows or hides the Adjust panel beside the picture: Camera Raw-style Light and Color sliders, plus the Bleach Bypass, Dark Contrasts and Detail Extractor filters."
+            return "Shows or hides the Adjust panel beside the picture: Camera Raw-style Light and Color sliders, plus the Detail Extractor, Dark Contrasts, Bleach Bypass, Bloom and Film Grain filters."
+        case .bloom:
+            return "Bloom, like Procreate's: the bright parts of the picture spill soft light around themselves. Amount = how strong, Transition = how much counts as bright (low = only the brightest highlights), Size = how far the light spreads, Burn = from a soft screen glow to light that can blow out to white."
+        case .facePreset:
+            return "One-click CodeFormer settings (the same as Protoart Studio's). Balanced suits most portraits; Keep likeness for real people; Heavy repair for distorted or tiny faces; Subtle keeps skin texture; Old photo for scans; Gentle for faces that only need a polish."
         case .grain:
             return "Film Grain: photographic grain over the picture. Intensity = how visible, Grain Size = fine to coarse, Softness = crisp to smooth, Mono or Color grain. Usually best last in the stack."
         case .light:
@@ -2720,6 +3072,14 @@ enum Guide: Equatable {
             return "How much of the restored face is used. 100% = fully restored; lower blends back toward the enhanced face for a subtler, more natural result. 70–80% suits most photos."
         case .faceFidelity:
             return "CodeFormer only. Low (0.2–0.4): cleanest, prettiest face, but may look less like the person. High (0.7–1.0): keeps the person's own features. 0.5 is a good balance."
+        case .likeness:
+            return "Keeps people and things looking like your photo while the AI adds detail (IP-Adapter Plus). 30–60% is a good start; higher sticks closer to the photo. Each part of the picture is guided by its own part of the photo. The first use downloads it once (1.3 GB)."
+        case .myPresets:
+            return "Your own presets: set the knobs, then + SAVE and give it a name (tick 'Include Adjust & filters' to keep those too). Click one to use it; right-click to update, rename or delete it."
+        case .addQueue:
+            return "Try several versions: + QUEUE adds this photo again with the current settings. Change the knobs (or pick a preset) and + QUEUE again, then press ENHANCE to run them all. Each result is saved with its settings in the file name."
+        case .autoSave:
+            return "On: every finished result is saved straight to your save folder (the Desktop unless you changed it), so you never have to hunt for it. Off: press SAVE yourself. In Overwrite mode results are never saved over your photo without SAVE."
         case .zoom:
             return "Scroll the mouse wheel (or two fingers on a trackpad) over the picture to zoom smoothly toward the pointer; pinch works too. Drag to look around. FIT shows the whole picture."
         }
@@ -2916,6 +3276,36 @@ struct ControlsPanel: View {
                             }
                         }
                     }
+                    HStack {
+                        EngravedLabel("My presets", size: 11)
+                        Spacer()
+                        Button("+ SAVE") { model.saveUserPreset() }
+                            .buttonStyle(MetalButtonStyle())
+                            .help("Save the current settings as your own preset")
+                    }
+                    .guide(.myPresets)
+                    if model.userPresets.isEmpty {
+                        EngravedLabel("Set the knobs you like, then + SAVE", size: 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: 3), spacing: 6) {
+                            ForEach(model.userPresets) { u in
+                                Button { withAnimation(.easeOut(duration: 0.15)) { model.applyUserPreset(u) } } label: {
+                                    Text(u.name.uppercased()).font(Console.label(10)).tracking(0.4)
+                                        .lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(PresetKeyStyle(lit: model.userPresetMatches(u)))
+                                .help(u.name + (u.filters != nil ? " (with Adjust & filters)" : "") + " · right-click to update, rename or delete")
+                                .contextMenu {
+                                    Button("Update with Current Settings") { model.updateUserPreset(u) }
+                                    Button("Rename…") { model.renameUserPreset(u) }
+                                    Divider()
+                                    Button("Delete…") { model.deleteUserPreset(u) }
+                                }
+                            }
+                        }
+                        .guide(.myPresets)
+                    }
                 }
 
                 Module(title: "Output") {
@@ -2973,9 +3363,19 @@ struct ControlsPanel: View {
                         ToggleSwitch(label: "Mode", off: "Copy", on: "Overwrite", isOn: overwrite)
                             .guide(.saveMode)
                     }
+                    HStack(spacing: 10) {
+                        ToggleSwitch(label: "Auto-save", off: "Off", on: "On", isOn: $model.autoSaveResults)
+                            .disabled(model.saveMode == "overwrite" && !model.batchMode)
+                        EngravedLabel(model.saveMode == "overwrite" && !model.batchMode
+                                      ? "Off in Overwrite mode: press SAVE" : "Saves each result as soon as it's done",
+                                      size: 10)
+                        Spacer(minLength: 0)
+                    }
+                    .guide(.autoSave)
                     HStack {
                         EngravedLabel(model.batchMode ? "Batch results save automatically" :
-                                        (model.saveMode == "overwrite" ? "Replaces the original" : "Saves a new file"),
+                                        (model.saveMode == "overwrite" ? "Replaces the original" :
+                                            (model.autoSaveResults ? "Every result saves itself here" : "Saves a new file")),
                                       size: 10)
                         Spacer()
                         Button("SAVE") { model.quickSave() }
@@ -3003,6 +3403,25 @@ struct ControlsPanel: View {
                     .frame(maxWidth: .infinity)
                 }
 
+                Module(title: "Likeness") {
+                    HStack(alignment: .center, spacing: 8) {
+                        Knob(label: "Likeness", value: $model.settings.likeness, range: 0...1, step: 0.05,
+                             display: { $0 <= 0 ? "OFF" : "\(Int(($0 * 100).rounded()))%" },
+                             help: "Keeps people and things looking like your photo while the AI adds detail (IP-Adapter Plus).")
+                            .guide(.likeness)
+                            .disabled(model.settings.mode == "instant")
+                        VStack(alignment: .leading, spacing: 4) {
+                            EngravedLabel(model.settings.mode == "instant" ? "Not used by INSTANT" :
+                                            (model.settings.likeness > 0 ? "On · keeps the photo's look" : "Off"), size: 10)
+                            EngravedLabel("IP-Adapter Plus · 1.3 GB on first use", size: 10)
+                            #if arch(x86_64)
+                            EngravedLabel("Slower on Intel Macs", size: 10)
+                            #endif
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+
                 Module(title: "Face Fix") {
                     HStack(alignment: .top, spacing: 2) {
                         VStack(spacing: 14) {
@@ -3022,7 +3441,7 @@ struct ControlsPanel: View {
                             }
                             .guide(.faceModel)
                         }
-                        Knob(label: "Strength", value: $model.faceStrength, range: 0...1, step: 0.05,
+                        Knob(label: "Strength", value: $model.faceStrength, range: 0.1...1, step: 0.05,
                              display: { "\(Int(($0 * 100).rounded()))%" },
                              help: "How much of the restored face is blended in.")
                             .guide(.faceStrength)
@@ -3034,6 +3453,27 @@ struct ControlsPanel: View {
                     }
                     .frame(maxWidth: .infinity)
                     .opacity(model.faceFix ? 1 : 0.75)
+                    VStack(alignment: .leading, spacing: 5) {
+                        EngravedLabel("CodeFormer presets", size: 11)
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 3), spacing: 5) {
+                            ForEach(FacePreset.all) { fp in
+                                let lit = model.faceFix && model.faceModel == "codeformer"
+                                    && abs(model.faceFidelity - fp.fidelity) < 0.001 && abs(model.faceStrength - fp.strength) < 0.001
+                                Button {
+                                    model.faceFix = true
+                                    model.faceModel = "codeformer"
+                                    model.faceFidelity = fp.fidelity
+                                    model.faceStrength = fp.strength
+                                } label: {
+                                    Text(fp.label).font(Console.label(10)).tracking(0.4).lineLimit(1)
+                                        .minimumScaleFactor(0.8).frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(PresetKeyStyle(lit: lit))
+                                .help(fp.tip)
+                            }
+                        }
+                    }
+                    .guide(.facePreset)
                     EngravedLabel(model.faceModel == "codeformer"
                                   ? "CodeFormer · non-commercial licence · 360 MB on first use"
                                   : "RestoreFormer · 280 MB on first use", size: 10)
@@ -3203,7 +3643,7 @@ struct FilterPanel: View {
     private func pct0(_ x: Double) -> String { String(format: "%.0f%%", x * 100) }
     private var activeCount: Int {
         [model.filters.lightOn, model.filters.colorOn, model.filters.bleachOn, model.filters.darkOn,
-         model.filters.extractOn, model.filters.grainOn].filter { $0 }.count
+         model.filters.extractOn, model.filters.grainOn, model.filters.bloomOn].filter { $0 }.count
     }
     private let grid = [GridItem(.flexible(), spacing: 2), GridItem(.flexible(), spacing: 2)]
 
@@ -3256,6 +3696,19 @@ struct FilterPanel: View {
                     SteppedKnob(label: "Effect Radius",
                                 options: [("F", "FINE", 0), ("N", "NORMAL", 1), ("C", "COARSE", 2)],
                                 selection: $model.filters.deRadius, size: 0.74)
+                }
+            }
+        case "bloom":
+            FilterRow(id: "bloom", title: "Bloom", isOn: $model.filters.bloomOn, open: $open,
+                      guide: .bloom, position: pos, count: total, onMove: { move("bloom", $0) }, onReset: {
+                model.filters.blAmount = 0.6; model.filters.blTransition = 0.4
+                model.filters.blSize = 0.4; model.filters.blBurn = 0
+            }) {
+                LazyVGrid(columns: grid, spacing: 6) {
+                    Knob(label: "Amount", value: v(\.blAmount), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                    Knob(label: "Transition", value: v(\.blTransition), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                    Knob(label: "Size", value: v(\.blSize), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                    Knob(label: "Burn", value: v(\.blBurn), range: 0...1, step: 0.05, display: pct0, size: 0.82)
                 }
             }
         default:
@@ -3637,6 +4090,12 @@ struct MeterBridge: View {
                     .buttonStyle(OutlinedButtonStyle.stop)
                     .help("Stop the queue (⌘.)")
             }
+            Button { model.queueVariation() } label: { Text("+ QUEUE") }
+                .buttonStyle(MetalButtonStyle())
+                .keyboardShortcut(.return, modifiers: [.command, .shift])
+                .disabled(model.selected == nil && model.items.isEmpty)
+                .help("Queue this photo again with the current settings (⇧⌘↩). Change the knobs and queue again to try several versions, then press ENHANCE.")
+                .guide(.addQueue)
             Button { model.start() } label: { Text(startTitle) }
                 .buttonStyle(OutlinedButtonStyle.process)
                 .keyboardShortcut(.return, modifiers: .command)
@@ -3780,6 +4239,12 @@ struct QueueRow: View {
                     .font(Console.label(14)).tracking(0.5)
                     .foregroundStyle(Color(white: 0.9))
                     .lineLimit(1).truncationMode(.middle)
+                if let job = item.job {
+                    Text(job.label.uppercased())
+                        .font(Console.mono(9.5))
+                        .foregroundStyle(Console.amber.opacity(0.9))
+                        .lineLimit(1).truncationMode(.tail)
+                }
                 if item.state == .running {
                     GeometryReader { g in
                         ZStack(alignment: .leading) {
@@ -3896,6 +4361,9 @@ struct QueuePanel: View {
                                     }
                                     if item.state != .running && item.state != .queued {
                                         Button("Enhance Again") { model.requeue(item.id) }
+                                    }
+                                    if item.job != nil {
+                                        Button("Use These Settings") { model.useSettings(of: item.id) }
                                     }
                                     if item.outputURL != nil {
                                         Button("Show in Finder") { model.reveal(item.id) }
@@ -4040,7 +4508,7 @@ enum HelpContent {
             "2. Pick a **preset**: **TURBO** for speed, **BALANCED** for the classic look, **QUALITY** for final prints.",
             "3. Press the blue **ENHANCE** button (⌘↩). The meter, percentage and time-left show progress.",
             "4. Compare the result with the view keys at the bottom (**SINGLE / SPLIT / SIDE**).",
-            "5. Press **SAVE** (⌘S) or **SAVE AS** (⇧⌘S).",
+            "5. The result is saved to your **Desktop** automatically (turn **Auto-save** off in the Save module to save by hand with **SAVE** ⌘S or **SAVE AS** ⇧⌘S).",
         ]),
         ("The first launch", [
             "The app downloads its AI models once (about 6 GB) and converts them to a smaller format (about 3 GB kept). After that it works offline. Each launch takes about 30–40 seconds to load the models; the READY light turns green when it's done.",
@@ -4066,10 +4534,23 @@ enum HelpContent {
             "**Max Size**: caps the long side. Smaller is much faster; 768 px is quickest.",
             "**Memory**: 8 GB keeps work in small pieces so an 8 GB Mac doesn't run out of memory. Use 16 GB+ only on bigger Macs.",
         ]),
+        ("Likeness", [
+            "**Likeness** keeps people and things looking like your photo while the AI adds detail. It uses IP-Adapter Plus: each part of the picture is guided by its own part of the photo, so big pictures don't grow extra faces.",
+            "Off by default. Try 30–60%; higher sticks closer to the photo but adds less new detail. Not used by INSTANT. The first use downloads it once (about 1.3 GB), checked against a fingerprint like the other models. It runs on every Mac; on Intel Macs it's slower.",
+        ]),
+        ("Trying several settings", [
+            "Press **+ QUEUE** (⇧⌘↩) to add the photo again with the current settings. Change the knobs or pick another preset and press **+ QUEUE** again, as many times as you like, then press **ENHANCE** to run them all.",
+            "Each queued row shows its settings in amber, and each result is saved with them in its file name. Right-click a row and choose **Use These Settings** to put them back on the knobs.",
+        ]),
+        ("My presets", [
+            "Set the knobs the way you like, then press **+ SAVE** under **My presets** and give it a name. Tick **Include Adjust & filters** to keep your Light, Color and filter settings too.",
+            "Click a preset to use it (its key lights up while the knobs match). Right-click it to **update** it with the current settings, **rename** it or **delete** it.",
+        ]),
         ("Face Fix", [
             "Turn **Face Fix** on to restore faces after the enhance: it finds every face (with macOS's built-in face detection), repairs eyes, teeth and skin, and blends the result back in with a soft edge. Great for fixing faces the AI detail warped, and for old or blurry portraits.",
             "**RESTORE** (RestoreFormer) is natural and faithful, and is the default. **CODE** (CodeFormer) repairs badly blurred or damaged faces more strongly. Its **Fidelity** knob trades a cleaner face (low) for keeping the person's own features (high, 0.7+).",
             "**Strength** blends the restored face with the original: 70–80% looks the most natural.",
+            "**CodeFormer presets** (the same as Protoart Studio's) set everything in one click: **BALANCED** for most portraits, **LIKENESS** for real people, **HEAVY** for distorted or tiny faces, **SUBTLE** keeps skin texture, **OLD PHOTO** for scans, **GENTLE** for faces that only need a polish.",
             "The first time you use each model it downloads once (RestoreFormer about 280 MB, CodeFormer about 360 MB), checked against a fingerprint like the other models. CodeFormer's licence allows **non-commercial use only**.",
             "It works with every preset, including INSTANT. Faces smaller than about 12 pixels between the eyes are left alone. The status line says how many faces were fixed.",
         ]),
@@ -4092,6 +4573,7 @@ enum HelpContent {
             "Fold the whole panel away with **◀** in its header (and open it again with **▶**). The header with **RESET** and **Apply: AFTER AI / BEFORE AI** stays put while the panel scrolls.",
             "**Click a filter's name** to apply it and open its knobs; click again to fold it away (it stays applied). The **checkbox** turns a filter on or off. Knobs only adjust a filter; they never switch it on. The screen previews everything live.",
             "**Bleach Bypass**: silvery, contrasty, half-desaturated film look. **Dark Contrasts**: deeper, moodier tones with crisp mid-tones. **Detail Extractor**: pulls out texture everywhere (FINE / NORMAL / COARSE radius).",
+            "**Bloom** (like Procreate's): the bright parts glow and spill soft light around themselves. **Amount** = strength, **Transition** = how much counts as bright, **Size** = how far the light spreads, **Burn** = from a soft glow to light that blows out to white.",
             "**Film Grain** adds photographic grain (Intensity, Grain Size, Softness, Mono or Color).",
             "Filters are applied **top to bottom**: use the **▲▼** buttons on a filter to restack it (e.g. grain usually goes last). Light and Color always run first. **RESET** turns everything off and restores the default order.",
         ]),
@@ -4110,7 +4592,8 @@ enum HelpContent {
 
     static let saving: [Section] = [
         ("Save module", [
-            "**Save To**: your default folder (click the tape to change it). Save, Save As and batch results use it.",
+            "**Save To**: your default folder, the **Desktop** unless you change it (click the tape). Save, Save As, Auto-save and batch results use it.",
+            "**Auto-save** (on by default): every finished result is saved there straight away, so nothing waits in a hidden temporary folder. macOS asks once to let the app save to your Desktop.",
             "**Format**: PNG (lossless), JPEG (small, 95% quality) or TIFF (lossless, for print and editing).",
             "**Mode**: **COPY** saves a brand-new file named like *photo-beautify.png* and never touches your original. **OVERWRITE** replaces the original photo, keeping its name and format; it asks first (you can tick \"Don't ask again\").",
             "**SAVE AS** (⇧⌘S) lets you pick any name, folder and format each time.",

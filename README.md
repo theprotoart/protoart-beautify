@@ -6,8 +6,10 @@ run on an **8 GB** Mac: no account, no cloud, no telemetry.
 
 Drop in an image → it's pre-upscaled 4× with ESRGAN, resized to your target size, then re-detailed tile by tile with
 Stable Diffusion 1.5 (Juggernaut Reborn) guided by a Tile ControlNet. Compare before/after (single, split or side by
-side, with smooth mouse-wheel zoom), fix faces with **RestoreFormer** or **CodeFormer**, finish it with Camera
-Raw-style Light/Color sliders and Color Efex-style filters, and save.
+side, with smooth mouse-wheel zoom), keep the photo's look with **Likeness** (IP-Adapter Plus), fix faces with
+**RestoreFormer** or **CodeFormer**, try several settings at once with **+ QUEUE**, save your own presets, finish it
+with Camera Raw-style Light/Color sliders and Color Efex-style filters (including a Procreate-style Bloom), and it
+saves to your Desktop.
 
 > **Models are not included.** The app downloads its models (~6 GB, once) from Hugging Face on first launch, and
 > **each model has its own licence**; some are non-commercial. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -68,7 +70,7 @@ bat-handle toggles, status LEDs and an analog VU meter.
   slider, then **Save As** (PNG/JPEG/TIFF).
 - **Batch mode** (toolbar toggle or ⌘B): a queue panel appears. Drop many images or whole
   folders, press **Enhance N**. Results auto-save with the Save module's settings
-  (default `~/Pictures/ProtoArt Beautify`, named `photo-beautify.png`, or over the originals in OVERWRITE mode).
+  (default: your Desktop, named `photo-beautify.png`, or over the originals in OVERWRITE mode).
   You can keep adding images while it runs. Click the ✕ on any queued or running row to
   cancel just that image (cancelling the running one moves straight on to the next);
   right-click a row to cancel, re-run, remove or show it in Finder. **Stop** (⌘.) halts
@@ -165,10 +167,10 @@ Close memory-heavy apps (browsers with many tabs) for the smoothest runs.
 ## Sharing
 
 `Make Beautify DMG.command` packages `dist/ProtoArt Beautify.app` with an Applications link and
-`Read Me First.txt` into `dist/ProtoArt-Beautify-1.2.dmg` (+ SHA-256).
+`Read Me First.txt` into `dist/ProtoArt-Beautify-1.3.dmg` (+ SHA-256).
 
 **Intel Macs:** `Build Intel Version.command` (or `./build.sh --arch x86_64`) builds an x86_64 copy into
-`dist-intel/` from this Apple Silicon Mac and packages `ProtoArt-Beautify-1.2-Intel.dmg`. It runs the AI
+`dist-intel/` from this Apple Silicon Mac and packages `ProtoArt-Beautify-1.3-Intel.dmg`. It runs the AI
 on the CPU (PyTorch 2.2.2, the last Intel-Mac release; float32), starts on TURBO, and is much slower:
 INSTANT took ~2 min at 1024 px under Rosetta. `Build Both Versions.command` rebuilds both DMGs.
 PyTorch 2.2.2's `torch.load` weakness (CVE-2025-32434) is covered by SHA-256-pinning every pickle file

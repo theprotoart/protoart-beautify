@@ -1,4 +1,4 @@
-ProtoArt Beautify 1.2 — AI image enhancer for Apple Silicon Macs
+ProtoArt Beautify 1.3 — AI image enhancer for Apple Silicon Macs
 =================================================================
 
 WHAT YOU NEED

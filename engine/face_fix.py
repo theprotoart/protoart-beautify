@@ -122,8 +122,9 @@ class FaceFixer:
         kind = "codeformer" if model == "codeformer" else "restoreformer"
         strength = float(max(0.0, min(1.0, strength)))
         fidelity = float(max(0.0, min(1.0, fidelity)))
-        if strength <= 0 or not faces:
+        if not faces:
             return image, 0
+        strength = max(0.1, strength)  # 0 would skip every face; the app's knob starts at 10%
         img = image.convert("RGB")
         w, h = img.size
         todo = []

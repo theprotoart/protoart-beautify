@@ -62,6 +62,12 @@ REMOTES: list[Remote] = [
            "173115bf2afcefcc7d6b27aedc681a5f5c9c8b0b", False, 278, optional=True),
     Remote("codeformer", "fofr/comfyui", "facerestore_models/codeformer.pth",
            "173115bf2afcefcc7d6b27aedc681a5f5c9c8b0b", False, 360, optional=True),
+    # Likeness lock (optional): IP-Adapter Plus SD 1.5 and the OpenCLIP ViT-H image encoder, both as converted
+    # and published by refiners (SHA-256 match refiners' own conversion records).
+    Remote("ip_plus", "refiners/sd15.ip_adapter.plus", "model.safetensors",
+           "2516bc6c2cbd933e7949f7c2c0f076790ff3bf35", False, 94, optional=True),
+    Remote("clip_image_h", "refiners/sd21.unclip.image_encoder", "model.safetensors",
+           "4a36eec8c6fcfa9911a9b3290c707b8ad7591cc3", False, 1206, optional=True),
 ]
 
 
@@ -75,6 +81,8 @@ PINNED_SHA256 = {
     "lcm_lora": "8f90d840e075ff588a58e22c6586e2ae9a6f7922996ee6649a7f01072333afe4",
     "restoreformer": "07404d446d62ca3d5ed38b1de09a947a1e77d46dbccec961a74d713a8f24ace0",
     "codeformer": "1009e537e0c2a07d4cabce6355f53cb66767cd4b4297ec7a4a64ca4b8a5684b7",
+    "ip_plus": "6eae5d2098fa83e3b8bf416fb46dd77a921ad044650f13890e8d41d7c84a71d2",
+    "clip_image_h": "c9f43e359e06f1a237324c4c11734d6acd7fbddbfd3b1ed4f1b525267bedb812",
 }
 
 

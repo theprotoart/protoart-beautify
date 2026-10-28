@@ -243,8 +243,27 @@ class _ReportingUpscaler(MultiUpscaler):
         return pad_to_multiple(image, 64)
 
     low_memory: bool = False
+    likeness: Any = None            # Likeness (IP-Adapter Plus) when the Likeness knob is up, else None
+    likeness_status: Any = None
+
+    def compute_targets(self, image, latent_size, tile_size, num_inference_steps, first_step,  # type: ignore[override]
+                        condition_scale, clip_text_embedding):
+        targets = super().compute_targets(
+            image=image, latent_size=latent_size, tile_size=tile_size, num_inference_steps=num_inference_steps,
+            first_step=first_step, condition_scale=condition_scale, clip_text_embedding=clip_text_embedding)
+        if self.likeness is not None:
+            # Each tile is prompted with its own part of the photo (never the whole picture).
+            crops = [image.crop((t.tile.left * 8, t.tile.top * 8, t.tile.right * 8, t.tile.bottom * 8)) for t in targets]
+            embs = self.likeness.tile_embeddings(crops, cfg=self.sd.classifier_free_guidance,
+                                                 status=self.likeness_status)
+            for t, e in zip(targets, embs):
+                t.ip_embedding = e  # type: ignore[attr-defined]
+        return targets
 
     def diffuse_target(self, x: torch.Tensor, step: int, target: UpscalerTarget) -> torch.Tensor:
+        emb = getattr(target, "ip_embedding", None)
+        if self.likeness is not None and emb is not None:
+            self.likeness.set_embedding(emb)
         out = super().diffuse_target(x=x, step=step, target=target)
         sync(self.device)
         if self.low_memory and self.device.type == "mps":
@@ -403,6 +422,8 @@ class Enhancer:
         )
         self.sliced = len(self.attention_layers)
         self.rates: dict[str, dict[str, float]] = {}  # per-profile timing memory for ETAs
+        self.paths = paths
+        self.likeness = None  # loaded the first time the Likeness knob is used
         free_memory(self.device)
         status("Models loaded", None)
 
@@ -450,6 +471,7 @@ class Enhancer:
         # between passes keeps macOS out of swap. On by default.
         low_memory: bool = True,
         mode: str = "detail",  # "detail" (diffusion) or "instant" (ESRGAN only, no new detail)
+        likeness: float = 0.0,  # 0 = off; >0 = IP-Adapter Plus strength (keeps the photo's people and things)
     ) -> Image.Image:
         p = PROFILES.get(profile, PROFILES["8gb"])
         self.up.esrgan_tile = p.esrgan_tile
@@ -502,6 +524,25 @@ class Enhancer:
             solver = "LCMSolver"
             num_inference_steps = min(int(num_inference_steps), 8)
 
+        # Likeness lock (optional): IP-Adapter Plus guided by each tile's own crop of the photo.
+        use_likeness = float(likeness or 0) > 0
+        if use_likeness:
+            if self.likeness is None:
+                ip_w, enc_w = self._likeness_files()
+                if ip_w is None:
+                    raise RuntimeError("The Likeness model isn't downloaded yet. Quit and reopen the app to "
+                                       "download it, or turn Likeness off.")
+                status("Loading the Likeness model (first use)", None)
+                from likeness import Likeness
+                from models import _verify
+                self.likeness = Likeness(self.up, ip_w, enc_w, _verify)
+            self.likeness.enable(min(1.0, float(likeness)))
+            self.up.likeness = self.likeness
+            self.up.likeness_status = lambda m: status(m, None)
+        elif self.likeness is not None:
+            self.likeness.disable()
+            self.up.likeness = None
+
         steps = int(num_inference_steps)
         plan, (th, tw) = plan_work(image.width, image.height, upscale_factor, p.tile_tokens, p.esrgan_tile,
                                    steps, denoise_strength)
@@ -537,5 +578,16 @@ class Enhancer:
                 result = result.crop(box)
         finally:
             self.up.tracker = None
+            if self.likeness is not None:
+                self.likeness.disable()
+                self.up.likeness = None
             free_memory(self.device)
         return result
+
+    def _likeness_files(self) -> tuple[Path | None, Path | None]:
+        from models import DOWNLOADS
+        ip_w = self.paths.get("ip_plus") or (DOWNLOADS / "ip_plus.safetensors")
+        enc_w = self.paths.get("clip_image_h") or (DOWNLOADS / "clip_image_h.safetensors")
+        if not Path(ip_w).exists() or not Path(enc_w).exists():
+            return None, None
+        return Path(ip_w), Path(enc_w)
