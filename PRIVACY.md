@@ -17,8 +17,8 @@ After that the app works offline.
 | --- | --- |
 | `~/Library/Application Support/ProtoArt Beautify/` | The downloaded models (~3 GB after one-time conversion) |
 | `~/Library/Logs/ProtoArt Beautify.log` | The engine log (errors and progress, no picture data) |
-| `~/Library/Preferences/com.protoart.beautify.plist` | Your settings: presets, knobs, save folder, filters |
-| Your save folder (default `~/Pictures/ProtoArt Beautify`) | Pictures you save |
+| `~/Library/Preferences/com.protoart.beautify.plist` | Your settings: your own presets, knobs, save folder, filters |
+| Your save folder (default: your Desktop) | Pictures you save (Auto-save puts every result here) |
 | The system temporary folder | Copies of the picture being processed; deleted when the app opens and quits |
 
 ## Removing everything

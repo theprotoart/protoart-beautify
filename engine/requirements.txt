@@ -4,4 +4,6 @@ spandrel>=0.4
 safetensors>=0.4.5
 huggingface_hub>=0.24
 numpy
-pillow>=12.3        # 12.3.0 fixes the 2026 decoder CVEs (e.g. CVE-2026-59203/59205)
+pillow>=13.0.0      # 13.0.0 fixes the Oct 2026 decoder advisories (e.g. GHSA-8g5g-8vmr-9782)
+filelock>=4.2.1     # 4.2.1 fixes the Oct 2026 lock-file advisories (torch dependency)
+setuptools>=84.1.0  # 84.1.0 fixes GHSA-xmj3-9gf7-h52w

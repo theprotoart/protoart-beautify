@@ -28,7 +28,7 @@ Only the latest release gets security fixes. The app has no automatic updates, s
   only over a private pipe. There are no environment-variable overrides in release builds.
 - Temporary copies of your pictures are deleted when the app opens and quits. "Overwrite original" writes a temporary
   file first and swaps it in, and asks before replacing anything.
-- Dependency floors cover known issues: PyTorch ≥ 2.6 and Pillow ≥ 12.3 on Apple Silicon. The Intel build must use
+- Dependency floors cover known issues: PyTorch ≥ 2.6 and Pillow ≥ 13.0 on Apple Silicon. The Intel build must use
   PyTorch 2.2.2 (the last Intel-Mac release); its `torch.load` weakness (CVE-2025-32434) is covered by the SHA-256
   checks above.
 - Release builds are checked for personal paths (`build.sh` scrubs the build machine's paths and warns if any remain;

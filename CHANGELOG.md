@@ -7,6 +7,7 @@
 - **Likeness** (IP-Adapter Plus): keeps people and objects looking like themselves while new detail is added. Optional ~1.4 GB download on first use.
 - **CodeFormer presets** for Face Fix, and a fix for a "no faces found" case.
 - **Bloom**: a Procreate-style glow filter for highlights.
+- **Security**: bundled Pillow 13.0.0 (fixes the October 2026 image-decoder advisories), filelock 4.2.5 and setuptools 84.2.1. Secret scan (gitleaks) and dependency audit (OSV) are clean, apart from the Intel-only PyTorch 2.2.2 notes in SECURITY.md.
 
 ## 1.2.0 — 2026-10-17
 

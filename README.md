@@ -159,7 +159,7 @@ Close memory-heavy apps (browsers with many tabs) for the smoothest runs.
   receives a fresh sRGB PNG written by the app, and its Pillow decoder is restricted to PNG/JPEG.
   pi-heif/libheif was removed (libheif 1.23.0 is affected by CVE-2026-84383).
 - Pickle-format model files load in safe mode (`torch.load(weights_only=True)`, spandrel's
-  restricted unpickler); dependency floors: torch ≥ 2.6, Pillow ≥ 12.3.
+  restricted unpickler); dependency floors: torch ≥ 2.6, Pillow ≥ 13.0.
 - The engine runs isolated (`python -I`) with a minimal environment; no environment overrides.
 - Temporary copies of images are deleted at launch and quit; Overwrite writes a temp file then swaps it in.
 - Ad-hoc signed (not notarized): recipients approve it once in System Settings › Privacy & Security.

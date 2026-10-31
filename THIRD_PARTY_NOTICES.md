@@ -51,5 +51,7 @@ has its own licence, which you accept by using it. **Some are non-commercial.**
 | LCM-LoRA SD 1.5 (Turbo) | `latent-consistency/lcm-lora-sdv1-5` | OpenRAIL++ |
 | RestoreFormer (Face Fix, downloaded on first use) | GFPGAN v1.3.4 release file, via `fofr/comfyui` (byte-identical, SHA-256 pinned) | see the GFPGAN repository |
 | CodeFormer (Face Fix, downloaded on first use) | CodeFormer v0.1.0 release file, via `fofr/comfyui` (byte-identical, SHA-256 pinned) | S-Lab License 1.0 (**non-commercial**) |
+| IP-Adapter Plus SD 1.5 (Likeness, downloaded on first use) | `refiners/sd15.ip_adapter.plus` (converted from `h94/IP-Adapter` `ip-adapter-plus_sd15`) | Apache-2.0 |
+| OpenCLIP ViT-H/14 image encoder (Likeness, downloaded on first use) | `refiners/sd21.unclip.image_encoder` | OpenRAIL++ |
 
 Check these licences before any commercial use of pictures made with the AI enhancement.
