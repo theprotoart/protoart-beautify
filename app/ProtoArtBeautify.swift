@@ -28,7 +28,7 @@ struct EnhanceSettings: Equatable, Codable {
     var likeness = 0.0         // 0 = off; IP-Adapter Plus strength (keeps the photo's people and things)
     var keepTones = true       // put the photo's own light and colour back after the AI (the new detail stays)
     var faceDetail = false     // Face Detail: redraw each face close up with the same AI (AI presets only)
-    var faceDetailStrength = 0.25
+    var faceDetailStrength = 0.15
     var faceDetailHair = false
 
     init() {}
@@ -3443,7 +3443,7 @@ enum Guide: Equatable {
         case .faceDetail:
             return "Like Protoart Studio's face detailer: after the enhance, each face is cut out with some room around it, redrawn close up at 512–768 px by the same AI, colour-matched and blended back with a soft edge. Small or distant faces get real eyes, lips and skin. Adds roughly 10–30 s per face. Runs before Face Fix, so you can use both. Not used by INSTANT. Turn it off with the switch."
         case .faceDetailStrength:
-            return "How much the close-up may change each face. 20–30% (the default is 25%) sharpens and adds detail while keeping the person; 40–60% redraws more and can change the look. The face's own shapes always guide the redraw, and it's matched to its surroundings."
+            return "How much the close-up may change each face. 15–20% (the default is 15%) sharpens and adds detail while keeping the person; 30% and up redraws more and can change the look. The face's own shapes always guide the redraw, and it's matched to its surroundings."
         case .faceDetailHair:
             return "Off: only the face (forehead to chin) is redrawn. On: the hair above and beside the face is redrawn too, for portraits where the hair looks soft."
         case .presence:
@@ -3817,7 +3817,7 @@ struct ControlsPanel: View {
                             .guide(.faceDetail)
                         Knob(label: "Strength", value: $model.settings.faceDetailStrength, range: 0.1...0.6, step: 0.05,
                              display: { "\(Int(($0 * 100).rounded()))%" },
-                             help: "How much the close-up may change the face. 20–30% sharpens and keeps the person; higher redraws more.")
+                             help: "How much the close-up may change the face. 15–20% sharpens and keeps the person; higher redraws more.")
                             .guide(.faceDetailStrength)
                         ToggleSwitch(label: "Hair", off: "Off", on: "On", isOn: $model.settings.faceDetailHair,
                                      help: "Also redraw the hair around the face")
@@ -5078,7 +5078,7 @@ enum HelpContent {
         ]),
         ("Face Detail", [
             "Turn **Face Detail** on to redraw every face close up after the enhance (like Protoart Studio's face detailer, or ADetailer): each face is cut out with some room around it, redrawn at 512–768 px by the same AI, matched to the light and colour around it, and blended back through a soft oval. Small or distant faces get real eyes, lips and skin instead of mush.",
-            "**Strength** sets how much each face may change: 20–30% (default 25%) sharpens and keeps the person, 40–60% redraws more. **Hair** on also redraws the hair around the face. It adds roughly 10–30 seconds per face and needs no download. It isn't used by INSTANT. Turn it off with its switch.",
+            "**Strength** sets how much each face may change: 15–20% (default 15%) sharpens and keeps the person; 30% and up redraws more and can change the look. **Hair** on also redraws the hair around the face. It adds roughly 10–30 seconds per face and needs no download. It isn't used by INSTANT. Turn it off with its switch.",
             "It runs before Face Fix, so you can use both: Face Detail adds detail, then Face Fix tidies eyes and teeth.",
         ]),
         ("Face Fix", [

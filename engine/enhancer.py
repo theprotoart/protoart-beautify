@@ -594,7 +594,7 @@ class Enhancer:
             steps = min(int(steps), 8)
         return use_turbo, solver, int(steps)
 
-    def detail_faces(self, image: Image.Image, boxes: list, status: Status, *, strength: float = 0.25,
+    def detail_faces(self, image: Image.Image, boxes: list, status: Status, *, strength: float = 0.15,
                      hair: bool = False, prompt: str = "masterpiece, best quality, highres",
                      negative_prompt: str = "worst quality, low quality, normal quality", seed: int = 42,
                      controlnet_scale: float = 0.6, controlnet_decay: float = 1.0, condition_scale: float = 6.0,

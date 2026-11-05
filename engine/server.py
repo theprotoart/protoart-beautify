@@ -135,7 +135,7 @@ def handle(req: dict) -> None:
             keys = ("prompt", "negative_prompt", "seed", "controlnet_scale", "controlnet_decay", "condition_scale",
                     "num_inference_steps", "solver", "turbo", "profile")
             result, faces_detailed = enh.detail_faces(
-                result, boxes, status, strength=float(detail.get("strength", 0.25)), hair=bool(detail.get("hair")),
+                result, boxes, status, strength=float(detail.get("strength", 0.15)), hair=bool(detail.get("hair")),
                 **{k: params[k] for k in keys if k in params})
         faces_fixed = 0
         if face is not None:  # one line in the app's log, to diagnose "no faces found"
