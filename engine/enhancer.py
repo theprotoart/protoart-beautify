@@ -226,7 +226,13 @@ class _ReportingUpscaler(MultiUpscaler):
     esrgan_tile: int = 192
     tracker: Tracker | None = None
 
+    skip_esrgan: bool = False       # Face Detail: the close-up is already at working size
+
     def pre_upscale(self, image: Image.Image, upscale_factor: float, **_: Any) -> Image.Image:
+        if self.skip_esrgan:
+            image = super().pre_upscale(image=image, upscale_factor=1.0)
+            self.crop_box = (0, 0, image.width, image.height)
+            return pad_to_multiple(image, 64)
         tr = self.tracker
 
         def on_tile() -> None:
@@ -513,16 +519,7 @@ class Enhancer:
         for layer in self.attention_layers:
             layer.slice_size = ATTENTION_SLICE // 2 if low_memory else ATTENTION_SLICE
 
-        # Turbo = distilled LCM-LoRA: few steps and no negative-prompt pass (half the work per step).
-        use_turbo = bool(turbo and self.turbo is not None)
-        if turbo and not use_turbo:
-            status(f"Turbo unavailable ({self.turbo_error}); using the normal engine", None)
-        if self.turbo is not None:
-            self.turbo.set(use_turbo)
-        self.up.sd.classifier_free_guidance = not use_turbo
-        if use_turbo:
-            solver = "LCMSolver"
-            num_inference_steps = min(int(num_inference_steps), 8)
+        use_turbo, solver, num_inference_steps = self._set_turbo(turbo, solver, num_inference_steps, status)
 
         # Likeness lock (optional): IP-Adapter Plus guided by each tile's own crop of the photo.
         use_likeness = float(likeness or 0) > 0
@@ -583,6 +580,95 @@ class Enhancer:
                 self.up.likeness = None
             free_memory(self.device)
         return result
+
+    def _set_turbo(self, turbo: bool, solver: str, steps: int, status: Status) -> tuple[bool, str, int]:
+        """Turbo = distilled LCM-LoRA: few steps and no negative-prompt pass (half the work per step)."""
+        use_turbo = bool(turbo and self.turbo is not None)
+        if turbo and not use_turbo:
+            status(f"Turbo unavailable ({self.turbo_error}); using the normal engine", None)
+        if self.turbo is not None:
+            self.turbo.set(use_turbo)
+        self.up.sd.classifier_free_guidance = not use_turbo
+        if use_turbo:
+            solver = "LCMSolver"
+            steps = min(int(steps), 8)
+        return use_turbo, solver, int(steps)
+
+    def detail_faces(self, image: Image.Image, boxes: list, status: Status, *, strength: float = 0.25,
+                     hair: bool = False, prompt: str = "masterpiece, best quality, highres",
+                     negative_prompt: str = "worst quality, low quality, normal quality", seed: int = 42,
+                     controlnet_scale: float = 0.6, controlnet_decay: float = 1.0, condition_scale: float = 6.0,
+                     num_inference_steps: int = 18, solver: str = "DDIM", turbo: bool = False,
+                     profile: str = "8gb", cancelled: Callable[[], bool] | None = None) -> tuple[Image.Image, int]:
+        """Face Detail (like Protoart Studio's face detailer / ADetailer): each face is cut out with room around
+        it, redrawn at 512-768 px by the same model, colour-matched to its surroundings and blended back through
+        a soft oval. Small faces come out with real detail instead of mush. -> (image, faces redrawn)"""
+        from facecrop import face_crop, paste_back
+        from tones import match_to_original
+
+        if not boxes:
+            return image, 0
+        p = PROFILES.get(profile, PROFILES["8gb"])
+        strength = float(max(0.1, min(0.8, strength)))
+        use_turbo, solver, steps = self._set_turbo(turbo, solver, num_inference_steps, status)
+        self.up.low_memory = True
+        for layer in self.attention_layers:
+            layer.slice_size = ATTENTION_SLICE // 2
+        if self.likeness is not None:
+            self.likeness.disable()
+            self.up.likeness = None
+        gen_device = self.device if self.device.type in ("mps", "cuda") else torch.device("cpu")
+        # Faithful by default: the close-up follows the face's own shapes closely (strong Tile ControlNet), so
+        # it adds detail without turning the person into someone else.
+        controlnet_scale = max(float(controlnet_scale), 1.0)
+        n = len(boxes)
+        per_face = max(1, steps - int(steps * (1 - strength)))
+        current = [1]
+        # Live progress and time left, like the enhance itself (rates are remembered for next time).
+        tracker = Tracker(plan=Plan(esrgan_tiles=0, passes=n * per_face, megapixels=n * 0.33),
+                          emit=lambda m, f, e: status(f"Face Detail — face {current[0]}/{n} · {m}", f, e),
+                          memory=self.rates.setdefault(profile + "-facedetail", {}))
+        done = 0
+        self.up.skip_esrgan = True
+        self.up.tracker = tracker
+        try:
+            for k, box in enumerate(boxes):
+                if cancelled and cancelled():
+                    break
+                current[0] = k + 1
+                tracker.encoded = tracker.decoded = False
+                tracker._send("starting")
+                side = max(box[2] - box[0], box[3] - box[1]) * 1.8
+                # Working size: 512 px (SD 1.5's native size) unless the face is already bigger; at most 768 px,
+                # which every memory profile handles as a single diffusion tile.
+                work = int(min(768, max(512, round(side / 64) * 64)))
+                crop, region, mask = face_crop(image, box, padding=1.8, work=work, hair=hair)
+                generator = torch.Generator(device=gen_device)
+                generator.manual_seed(int(seed) + k + 1)
+                lat = work // 8
+                out = self.up.upscale(
+                    image=crop, prompt=prompt or "", negative_prompt=negative_prompt or "",
+                    upscale_factor=1.0, controlnet_scale=controlnet_scale, controlnet_scale_decay=controlnet_decay,
+                    condition_scale=condition_scale, tile_size=(lat, lat), denoise_strength=strength,
+                    num_inference_steps=steps, loras_scale=None, solver_type=solver_class(solver, self.device),
+                    autoencoder_tile_length=p.vae_tile, generator=generator)
+                box_c = getattr(self.up, "crop_box", None)
+                if box_c and (box_c[2], box_c[3]) != out.size:
+                    out = out.crop(box_c)
+                if out.size != crop.size:
+                    out = out.resize(crop.size, Image.Resampling.LANCZOS)
+                out = match_to_original(out, crop, mask)  # same light and colour as around the face
+                image = paste_back(image, out, region, mask)
+                done += 1
+                free_memory(self.device)
+            tracker.finish()
+        finally:
+            self.up.skip_esrgan = False
+            self.up.tracker = None
+            free_memory(self.device)
+        if done:
+            status("Face Detail done", 1.0, None)
+        return image, done
 
     def _likeness_files(self) -> tuple[Path | None, Path | None]:
         from models import DOWNLOADS

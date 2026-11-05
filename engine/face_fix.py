@@ -148,6 +148,10 @@ class FaceFixer:
             crop = img.transform((512, 512), Image.Transform.AFFINE, _pil_coeffs(inv),
                                  resample=Image.Resampling.BICUBIC)
             fixed = self._restore_crop(net, kind, crop, fidelity)
+            # The restored face keeps the photo's own light and colour (its broad shading comes from the
+            # crop), so it doesn't show as a lighter or pinker patch (as in Protoart Studio's Keep faces).
+            from tones import keep_tones
+            fixed = keep_tones(fixed, crop, radius=20)
             if strength < 1:
                 fixed = Image.blend(crop, fixed, strength)
 

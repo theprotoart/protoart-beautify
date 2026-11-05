@@ -65,6 +65,20 @@ def get_face_fixer():
     return _face_fixer
 
 
+_ICC: list = []
+
+
+def _srgb_icc() -> bytes | None:
+    if not _ICC:
+        try:
+            from PIL import ImageCms
+            _ICC.append(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
+        except Exception as e:  # Pillow without LittleCMS: save untagged, as before
+            print(f"[tones] no sRGB profile: {e}", flush=True)
+            _ICC.append(None)
+    return _ICC[0]
+
+
 def open_image(path: str):
     # The Mac app decodes the user's file with macOS ImageIO and passes a PNG it wrote itself, so only
     # PNG (and, for the command-line tool, JPEG) decoders are enabled here.
@@ -102,7 +116,27 @@ def handle(req: dict) -> None:
         image = open_image(req["input"])
         params = dict(req.get("params") or {})
         face = params.pop("face_fix", None)  # {"model", "strength", "fidelity", "faces": [[[x, y] * 5], ...]}
+        detail = params.pop("face_detail", None)  # {"strength", "hair", "faces": [[[x, y] * 5], ...]}
+        keep = bool(params.pop("keep_tones", True))
         result = enh.enhance(image, status, **params)
+        from tones import keep_tones, mean_luma
+        lum_in, lum_ai = mean_luma(image), mean_luma(result)
+        if keep:  # the AI's new detail, with the photo's own light and colour
+            status("Keeping the photo's tones", None)
+            result = keep_tones(result, image)
+        print(f"[tones] brightness in={lum_in:.1f} ai={lum_ai:.1f} out={mean_luma(result):.1f} "
+              f"keep_tones={'on' if keep else 'off'}", flush=True)
+        faces_detailed = 0
+        if isinstance(detail, dict) and detail.get("faces") and params.get("mode", "detail") == "detail":
+            from facecrop import boxes_from_landmarks
+            boxes = boxes_from_landmarks(detail["faces"], result.width, result.height)[:8]
+            print(f"[face detail] {len(boxes)} face(s); strength={detail.get('strength')} hair={detail.get('hair')}",
+                  flush=True)
+            keys = ("prompt", "negative_prompt", "seed", "controlnet_scale", "controlnet_decay", "condition_scale",
+                    "num_inference_steps", "solver", "turbo", "profile")
+            result, faces_detailed = enh.detail_faces(
+                result, boxes, status, strength=float(detail.get("strength", 0.25)), hair=bool(detail.get("hair")),
+                **{k: params[k] for k in keys if k in params})
         faces_fixed = 0
         if face is not None:  # one line in the app's log, to diagnose "no faces found"
             n_in = len(face.get("faces") or []) if isinstance(face, dict) else -1
@@ -115,13 +149,16 @@ def handle(req: dict) -> None:
                 status=lambda m, f: status(m, f))
         out = Path(req["output"])
         out.parent.mkdir(parents=True, exist_ok=True)
+        # Tag the result as sRGB (what the app hands in), so Before and After are shown with the same colours.
+        icc = _srgb_icc()
+        extra = {"icc_profile": icc} if icc else {}
         if out.suffix.lower() in (".jpg", ".jpeg"):
-            result.save(out, format="JPEG", quality=95, subsampling=0)
+            result.save(out, format="JPEG", quality=95, subsampling=0, **extra)
         else:
-            result.save(out, format="PNG")
+            result.save(out, format="PNG", **extra)
         emit({"id": rid, "event": "done", "output": str(out), "width": result.width,
               "height": result.height, "seconds": round(time.time() - t0, 1),
-              "faces_fixed": faces_fixed})
+              "faces_fixed": faces_fixed, "faces_detailed": faces_detailed})
     else:
         emit({"id": rid, "event": "error", "message": f"unknown command {cmd!r}"})
 

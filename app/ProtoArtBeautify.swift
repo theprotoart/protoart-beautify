@@ -26,6 +26,10 @@ struct EnhanceSettings: Equatable, Codable {
     var mode = "detail"        // "detail" = AI re-detailing, "instant" = 4× upscaler only
     var turbo = false          // distilled LCM add-on: ~2 passes, no negative-prompt pass
     var likeness = 0.0         // 0 = off; IP-Adapter Plus strength (keeps the photo's people and things)
+    var keepTones = true       // put the photo's own light and colour back after the AI (the new detail stays)
+    var faceDetail = false     // Face Detail: redraw each face close up with the same AI (AI presets only)
+    var faceDetailStrength = 0.25
+    var faceDetailHair = false
 
     init() {}
 
@@ -39,7 +43,12 @@ struct EnhanceSettings: Equatable, Codable {
         resemblanceDecay = v(.resemblanceDecay, z.resemblanceDecay); hdr = v(.hdr, z.hdr); creativity = v(.creativity, z.creativity)
         steps = v(.steps, z.steps); solver = v(.solver, z.solver); mode = v(.mode, z.mode); turbo = v(.turbo, z.turbo)
         likeness = v(.likeness, z.likeness)
+        keepTones = v(.keepTones, z.keepTones); faceDetail = v(.faceDetail, z.faceDetail)
+        faceDetailStrength = v(.faceDetailStrength, z.faceDetailStrength); faceDetailHair = v(.faceDetailHair, z.faceDetailHair)
     }
+
+    /// Face Detail only runs with the AI (not INSTANT).
+    var faceDetailActive: Bool { faceDetail && mode == "detail" }
 
     var rateKey: String { "\(profile)-\(mode)\(turbo ? "-turbo" : "")" }  // speed memory for estimates
 
@@ -59,6 +68,7 @@ struct EnhanceSettings: Equatable, Codable {
             "mode": mode,
             "turbo": turbo,
             "low_memory": true,
+            "keep_tones": keepTones,
         ]
         if maxSide > 0 { p["max_output_side"] = maxSide }
         if mode == "detail" && likeness > 0 { p["likeness"] = likeness }
@@ -230,6 +240,21 @@ struct DetailFilters: Codable, Equatable {
     var tint = 0.0              // -1…1 (green … magenta)
     var vibrance = 0.0          // -1…1
     var saturation = 0.0        // -1…1
+    // Presence (Camera Raw), from Protoart Studio's Adjust:
+    var texture = 0.0           // -1…1 fine detail (skin, foliage), not edges
+    var clarity = 0.0           // -1…1 mid-tone contrast over larger areas
+    var dehaze = 0.0            // -1…1 + takes haze away, - adds a soft veil
+    var sharpen = 0.0           // 0…1
+    var vignette = 0.0          // -1…1 + darkens, - lightens the corners
+    // Color Mixer (HSL): per band red, orange, yellow, green, aqua, blue, purple, magenta; -1…1 each
+    var mixHue = [Double](repeating: 0, count: 8)
+    var mixSat = [Double](repeating: 0, count: 8)
+    var mixLum = [Double](repeating: 0, count: 8)
+    // Color Grading: hue (degrees) and amount (0…1) for shadows, midtones, highlights; balance -1…1
+    var cgShHue = 220.0, cgShSat = 0.0
+    var cgMidHue = 30.0, cgMidSat = 0.0
+    var cgHiHue = 40.0, cgHiSat = 0.0
+    var cgBalance = 0.0
     // Bleach Bypass: the film look of skipping the bleach bath — silvery, contrasty, half desaturated.
     var bleachOn = false
     var bbBrightness = 0.0      // -1…1
@@ -259,9 +284,26 @@ struct DetailFilters: Codable, Equatable {
     var blTransition = 0.4      // 0…1 how much of the picture counts as bright (low = only the brightest)
     var blSize = 0.4            // 0…1 how far the light spreads
     var blBurn = 0.0            // 0…1 screen (0) … adds light, can blow out (1)
+    // Glamour Glow (Nik Color Efex): soft, flattering glow.
+    var glowOn = false
+    var ggGlow = 0.5            // 0…1
+    var ggSaturation = 0.0      // -1…1
+    var ggWarmth = 0.0          // -1…1
+    // Blur: softens; Soft focus screens the blur over the picture.
+    var blurOn = false
+    var bzSize = 0.3            // 0…1
+    var bzMix = 1.0             // 0…1
+    var bzKind = 0              // 0 blur · 1 soft focus
+    // Skin Texture: procedural pores, fine bumps and optional freckles (shading only).
+    var skinOn = false
+    var skAmount = 0.5          // 0…1.5
+    var skSize = 0.35           // 0…1 pore size
+    var skFine = 0.5            // 0…1 fine texture
+    var skFreckles = 0.0        // 0…1
+    var skSeed = 0.0            // pattern
     /// Stack order of the creative filters (top runs first). Light/Color always run before them.
     var order = DetailFilters.defaultOrder
-    static let defaultOrder = ["extract", "dark", "bleach", "bloom", "grain"]
+    static let defaultOrder = ["extract", "dark", "bleach", "glow", "bloom", "blur", "skin", "grain"]  // as in Studio
 
     init() {}
 
@@ -288,6 +330,18 @@ struct DetailFilters: Codable, Equatable {
         grainColor = v(.grainColor, z.grainColor)
         bloomOn = v(.bloomOn, z.bloomOn); blAmount = v(.blAmount, z.blAmount)
         blTransition = v(.blTransition, z.blTransition); blSize = v(.blSize, z.blSize); blBurn = v(.blBurn, z.blBurn)
+        texture = v(.texture, z.texture); clarity = v(.clarity, z.clarity); dehaze = v(.dehaze, z.dehaze)
+        sharpen = v(.sharpen, z.sharpen); vignette = v(.vignette, z.vignette)
+        func eight(_ a: [Double]) -> [Double] { a.count == 8 ? a : [Double](repeating: 0, count: 8) }
+        mixHue = eight(v(.mixHue, z.mixHue)); mixSat = eight(v(.mixSat, z.mixSat)); mixLum = eight(v(.mixLum, z.mixLum))
+        cgShHue = v(.cgShHue, z.cgShHue); cgShSat = v(.cgShSat, z.cgShSat)
+        cgMidHue = v(.cgMidHue, z.cgMidHue); cgMidSat = v(.cgMidSat, z.cgMidSat)
+        cgHiHue = v(.cgHiHue, z.cgHiHue); cgHiSat = v(.cgHiSat, z.cgHiSat); cgBalance = v(.cgBalance, z.cgBalance)
+        glowOn = v(.glowOn, z.glowOn); ggGlow = v(.ggGlow, z.ggGlow)
+        ggSaturation = v(.ggSaturation, z.ggSaturation); ggWarmth = v(.ggWarmth, z.ggWarmth)
+        blurOn = v(.blurOn, z.blurOn); bzSize = v(.bzSize, z.bzSize); bzMix = v(.bzMix, z.bzMix); bzKind = v(.bzKind, z.bzKind)
+        skinOn = v(.skinOn, z.skinOn); skAmount = v(.skAmount, z.skAmount); skSize = v(.skSize, z.skSize)
+        skFine = v(.skFine, z.skFine); skFreckles = v(.skFreckles, z.skFreckles); skSeed = v(.skSeed, z.skSeed)
         order = DetailFilters.fullOrder(v(.order, z.order))
     }
 
@@ -303,10 +357,24 @@ struct DetailFilters: Codable, Equatable {
 
     var lightOn: Bool { exposure != 0 || contrast != 0 || highlights != 0 || shadows != 0 || whites != 0 || blacks != 0 }
     var colorOn: Bool { temperature != 0 || tint != 0 || vibrance != 0 || saturation != 0 }
-    var anyOn: Bool { lightOn || colorOn || bleachOn || darkOn || extractOn || grainOn || (bloomOn && blAmount > 0) }
+    var presenceOn: Bool { texture != 0 || clarity != 0 || dehaze != 0 || sharpen != 0 || vignette != 0 }
+    var mixerOn: Bool { (mixHue + mixSat + mixLum).contains { $0 != 0 } }
+    var gradingOn: Bool { cgShSat != 0 || cgMidSat != 0 || cgHiSat != 0 }
+    var anyOn: Bool {
+        lightOn || colorOn || presenceOn || mixerOn || gradingOn || bleachOn || darkOn || extractOn || grainOn
+            || (bloomOn && blAmount > 0) || (glowOn && ggGlow > 0) || (blurOn && bzMix > 0) || (skinOn && skAmount > 0)
+    }
 
     mutating func resetLight() { exposure = 0; contrast = 0; highlights = 0; shadows = 0; whites = 0; blacks = 0 }
     mutating func resetColor() { temperature = 0; tint = 0; vibrance = 0; saturation = 0 }
+    mutating func resetPresence() { texture = 0; clarity = 0; dehaze = 0; sharpen = 0; vignette = 0 }
+    mutating func resetMixer() {
+        mixHue = [Double](repeating: 0, count: 8); mixSat = mixHue; mixLum = mixHue
+    }
+    mutating func resetGrading() {
+        let z = DetailFilters()
+        cgShHue = z.cgShHue; cgShSat = 0; cgMidHue = z.cgMidHue; cgMidSat = 0; cgHiHue = z.cgHiHue; cgHiSat = 0; cgBalance = 0
+    }
 
     static func load() -> DetailFilters {
         guard let d = UserDefaults.standard.data(forKey: "detailFilters"),
@@ -316,6 +384,215 @@ struct DetailFilters: Codable, Equatable {
 
     func save() {
         if let d = try? JSONEncoder().encode(self) { UserDefaults.standard.set(d, forKey: "detailFilters") }
+    }
+}
+
+/// Core Image kernels for the filters ported from Protoart Studio's Adjust (its WebGL shaders, same maths).
+/// Inputs are in display gamma (sRGB-encoded). A kernel that fails to compile is nil: that step is skipped
+/// (and logged) instead of crashing the app.
+enum Kernels {
+    private static func make(_ name: String, _ src: String) -> CIColorKernel? {
+        let k = CIColorKernel(source: src)
+        if k == nil { NSLog("ProtoArt Beautify: the %@ filter's kernel didn't compile; skipping it", name) }
+        return k
+    }
+    private static let lumaFn = "float pabLuma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }\n"
+
+    /// unsharp mask c + amount * (c - blur); midtone-weighted for Texture / Clarity
+    static let local = make("local", lumaFn + """
+    kernel vec4 pabLocal(__sample c, __sample b, float amount, float mid) {
+        float w = 1.0;
+        if (mid > 0.5) { float L = pabLuma(c.rgb); w = 1.0 - pow(abs(L - 0.5) * 2.0, 2.0); }
+        return vec4(c.rgb + amount * w * (c.rgb - b.rgb), c.a);
+    }
+    """)
+
+    /// Dehaze: haze guessed from the local darkest channel (dark-channel prior)
+    static let dehaze = make("dehaze", lumaFn + """
+    kernel vec4 pabDehaze(__sample s, __sample b, float amount) {
+        vec3 c = s.rgb;
+        float dark = min(b.r, min(b.g, b.b));
+        float A = 0.95;
+        if (amount > 0.0) {
+            float t = max(1.0 - amount * 0.9 * dark / A, 0.35);
+            vec3 r = (c - A * (1.0 - t)) / t;
+            float L0 = pabLuma(c);
+            float L1 = pabLuma(r);
+            r = mix(vec3(L1), r, 1.0 + 0.25 * amount);
+            c = mix(c, r, 0.85) + (L0 - L1) * 0.25 * amount;
+        } else {
+            float k = -amount * (0.35 + 0.45 * (1.0 - dark));
+            c = mix(c, vec3(A) * 0.85 + c * 0.15, k * 0.7);
+        }
+        return vec4(max(c, vec3(0.0)), s.a);
+    }
+    """)
+
+    static let vignette = make("vignette", """
+    kernel vec4 pabVignette(__sample c, vec2 center, float scale, float amount) {
+        vec2 d = (destCoord() - center) * scale;
+        float r = length(d) / 1.4142;
+        float v = smoothstep(0.35, 1.05, r);
+        vec3 o = amount >= 0.0 ? c.rgb * (1.0 - amount * 0.85 * v) : mix(c.rgb, vec3(1.0), -amount * 0.7 * v);
+        return vec4(o, c.a);
+    }
+    """)
+
+    /// Color Mixer (HSL): bands centred at 0, 30, 60, 120, 180, 240, 270, 300 degrees
+    static let mixer = make("mixer", lumaFn + """
+    float pabBand(vec4 a, vec4 b, float h) {
+        if (h < 30.0) return mix(a.x, a.y, h / 30.0);
+        if (h < 60.0) return mix(a.y, a.z, (h - 30.0) / 30.0);
+        if (h < 120.0) return mix(a.z, a.w, (h - 60.0) / 60.0);
+        if (h < 180.0) return mix(a.w, b.x, (h - 120.0) / 60.0);
+        if (h < 240.0) return mix(b.x, b.y, (h - 180.0) / 60.0);
+        if (h < 270.0) return mix(b.y, b.z, (h - 240.0) / 30.0);
+        if (h < 300.0) return mix(b.z, b.w, (h - 270.0) / 30.0);
+        return mix(b.w, a.x, (h - 300.0) / 60.0);
+    }
+    vec3 pabHsl(vec3 c) {
+        float mx = max(c.r, max(c.g, c.b));
+        float mn = min(c.r, min(c.g, c.b));
+        float l = (mx + mn) * 0.5;
+        float d = mx - mn;
+        float h = 0.0;
+        float s = 0.0;
+        if (d > 0.00001) {
+            s = d / (1.0 - abs(2.0 * l - 1.0) + 0.00001);
+            if (mx == c.r) { h = mod((c.g - c.b) / d, 6.0); }
+            else if (mx == c.g) { h = (c.b - c.r) / d + 2.0; }
+            else { h = (c.r - c.g) / d + 4.0; }
+            h = h * 60.0;
+        }
+        return vec3(h, s, l);
+    }
+    vec3 pabRgb(vec3 h) {
+        float c = (1.0 - abs(2.0 * h.z - 1.0)) * h.y;
+        float x = c * (1.0 - abs(mod(h.x / 60.0, 2.0) - 1.0));
+        float m = h.z - c * 0.5;
+        vec3 r = vec3(c, 0.0, x);
+        if (h.x < 60.0) { r = vec3(c, x, 0.0); }
+        else if (h.x < 120.0) { r = vec3(x, c, 0.0); }
+        else if (h.x < 180.0) { r = vec3(0.0, c, x); }
+        else if (h.x < 240.0) { r = vec3(0.0, x, c); }
+        else if (h.x < 300.0) { r = vec3(x, 0.0, c); }
+        return r + m;
+    }
+    kernel vec4 pabMixer(__sample s, vec4 h0, vec4 h1, vec4 s0, vec4 s1, vec4 l0, vec4 l1) {
+        vec3 c = clamp(s.rgb, 0.0, 1.0);
+        vec3 h = pabHsl(c);
+        float w = smoothstep(0.02, 0.18, h.y);
+        float dh = pabBand(h0, h1, h.x);
+        float ds = pabBand(s0, s1, h.x);
+        float dl = pabBand(l0, l1, h.x);
+        h.x = mod(h.x + dh * 30.0 * w + 360.0, 360.0);
+        h.y = clamp(h.y * (1.0 + ds * w), 0.0, 1.0);
+        vec3 r = pabRgb(h);
+        r = r * max(0.0, 1.0 + dl * 0.6 * w * h.y);
+        return vec4(r, s.a);
+    }
+    """)
+
+    /// Color Grading: tint shadows / midtones / highlights; brightness kept
+    static let grade = make("grade", lumaFn + """
+    kernel vec4 pabGrade(__sample s, vec3 sh, vec3 mid, vec3 hi, float balance) {
+        vec3 c = s.rgb;
+        float L = clamp(pabLuma(c), 0.0, 1.0);
+        float b = 0.5 - 0.35 * balance;
+        float ws = 1.0 - smoothstep(0.0, b * 1.6, L);
+        float wh = smoothstep(b * 0.6, 1.0, L);
+        float wm = max(0.0, 1.0 - ws - wh);
+        vec3 r = c + sh * ws + mid * wm + hi * wh;
+        r = r * (L / max(pabLuma(r), 0.0001));
+        return vec4(max(r, vec3(0.0)), s.a);
+    }
+    """)
+
+    static let glow = make("glow", """
+    kernel vec4 pabGlow(__sample s, __sample bl, float amount, float warmth) {
+        vec3 c = clamp(s.rgb, 0.0, 1.0);
+        vec3 b = clamp(bl.rgb, 0.0, 1.0);
+        vec3 scr = 1.0 - (1.0 - c) * (1.0 - b);
+        c = mix(c, scr, amount * 0.7);
+        c = mix(c, c * 0.9 + 0.1 * b, amount * 0.3);
+        c = c * vec3(1.0 + 0.06 * warmth, 1.0 + 0.01 * warmth, 1.0 - 0.06 * warmth);
+        return vec4(c, s.a);
+    }
+    """)
+
+    static let blurMix = make("blur", """
+    kernel vec4 pabBlurMix(__sample s, __sample bl, float amount, float soft) {
+        vec3 c = s.rgb;
+        vec3 b = bl.rgb;
+        vec3 t = b;
+        if (soft > 0.5) { t = mix(c, 1.0 - (1.0 - c) * (1.0 - b), 0.6) * 0.5 + b * 0.5; }
+        return vec4(mix(c, t, amount), s.a);
+    }
+    """)
+
+    /// Skin Texture: cellular pores, fine bumps, optional freckles; shading only, mid-tone weighted
+    static let skin = make("skin", lumaFn + """
+    vec2 pabHash2(vec2 p, float seed) {
+        p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+        return fract(sin(p + seed) * 43758.5453);
+    }
+    float pabHash1(vec2 p, float seed) { return fract(sin(dot(p, vec2(41.7, 289.3)) + seed) * 24634.6345); }
+    float pabPore(vec2 x, float keep, float seed) {
+        vec2 i = floor(x);
+        vec2 f = fract(x);
+        float best = 0.0;
+        for (int y = -1; y <= 1; y++) {
+            for (int k = -1; k <= 1; k++) {
+                vec2 g = vec2(float(k), float(y));
+                vec2 id = i + g;
+                float h = pabHash1(id + 7.3, seed);
+                if (h <= keep) {
+                    vec2 r = g + pabHash2(id, seed) - f;
+                    float rad = 0.12 + 0.16 * pabHash1(id + 3.1, seed);
+                    float depth = 0.5 + 0.5 * pabHash1(id + 5.7, seed);
+                    best = max(best, depth * (1.0 - smoothstep(rad * 0.25, rad, length(r))));
+                }
+            }
+        }
+        return best;
+    }
+    float pabNoise(vec2 x, float seed) {
+        vec2 i = floor(x);
+        vec2 f = fract(x);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(pabHash1(i, seed), pabHash1(i + vec2(1.0, 0.0), seed), f.x),
+                   mix(pabHash1(i + vec2(0.0, 1.0), seed), pabHash1(i + vec2(1.0, 1.0), seed), f.x), f.y);
+    }
+    kernel vec4 pabSkin(__sample s, float amount, float cell, float fine, float freckles, float seed) {
+        vec3 c = s.rgb;
+        vec2 px = destCoord();
+        float dens = 0.35 + 0.35 * pabNoise(px / (cell * 12.0) + 5.0, seed);
+        float pores = pabPore(px / cell, dens, seed) + 0.6 * pabPore(px / (cell * 1.8) + 13.0, dens * 0.5, seed);
+        float bumps = (pabNoise(px / (cell * 0.6), seed) - 0.5) + 0.5 * (pabNoise(px / (cell * 0.3) + 9.0, seed) - 0.5)
+                    + 0.6 * (pabNoise(px / (cell * 2.5) + 21.0, seed) - 0.5);
+        float L = pabLuma(c);
+        float mid = smoothstep(0.04, 0.3, L) * (1.0 - smoothstep(0.9, 1.0, L));
+        float t = (-0.3 * pores + fine * 0.22 * bumps) * amount * mid;
+        float lit = smoothstep(0.45, 0.85, L);
+        c = c * (1.0 + t) + vec3(0.025 * fine * max(0.0, bumps) * amount * mid * lit);
+        if (freckles > 0.0) {
+            float cluster = smoothstep(0.4, 0.75, pabNoise(px / (cell * 40.0) + 3.0, seed));
+            float spot = pabPore(px / (cell * 3.0) + 41.0, 0.3 + 0.4 * cluster, seed);
+            c = mix(c, c * vec3(0.82, 0.66, 0.52), spot * freckles * 0.75 * mid);
+        }
+        return vec4(max(c, vec3(0.0)), s.a);
+    }
+    """)
+
+    /// Color Grading tint: a colour of that hue centred on grey, scaled by the amount (as Studio's tintOf)
+    static func tint(_ hue: Double, _ sat: Double) -> CIVector {
+        let h = (hue.truncatingRemainder(dividingBy: 360) + 360).truncatingRemainder(dividingBy: 360)
+        func f(_ n: Double) -> Double {
+            let k = (n + h / 30).truncatingRemainder(dividingBy: 12)
+            return 0.5 - 0.5 * max(-1, min(k - 3, 9 - k, 1))
+        }
+        let a = 0.35 * sat
+        return CIVector(x: (f(0) - 0.5) * a, y: (f(8) - 0.5) * a, z: (f(4) - 0.5) * a)
     }
 }
 
@@ -367,6 +644,37 @@ enum DetailFilterEngine {
         if f.vibrance != 0 {
             img = img.applyingFilter("CIVibrance", parameters: ["inputAmount": f.vibrance])
         }
+        // 1b. Presence, Color Mixer and Color Grading (Protoart Studio's Adjust maths, run in display gamma).
+        if f.presenceOn || f.mixerOn || f.gradingOn {
+            var g = img.applyingFilter("CILinearToSRGBToneCurve")
+            func blurred(_ i: CIImage, _ r: Double) -> CIImage {
+                i.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: r]).cropped(to: ext)
+            }
+            func local(_ i: CIImage, radius: Double, amount: Double, midtones: Bool) -> CIImage {
+                guard amount != 0, let k = Kernels.local else { return i }
+                return k.apply(extent: ext, arguments: [i, blurred(i, radius * unit), amount, midtones ? 1.0 : 0.0]) ?? i
+            }
+            if f.dehaze != 0, let k = Kernels.dehaze {   // first, like Camera Raw: it works on the whole scene
+                g = k.apply(extent: ext, arguments: [g, blurred(g, 18 * unit), f.dehaze]) ?? g
+            }
+            g = local(g, radius: 3.5, amount: 1.1 * f.texture, midtones: true)
+            g = local(g, radius: 30, amount: 0.9 * f.clarity, midtones: true)
+            if f.sharpen > 0 { g = local(g, radius: 0.9, amount: 1.6 * f.sharpen, midtones: false) }
+            if f.vignette != 0, let k = Kernels.vignette {
+                let long = Double(max(ext.width, ext.height))
+                g = k.apply(extent: ext, arguments: [g, CIVector(x: ext.midX, y: ext.midY), 2 / long, f.vignette]) ?? g
+            }
+            if f.mixerOn, let k = Kernels.mixer {
+                func v4(_ a: [Double], _ o: Int) -> CIVector { CIVector(x: a[o], y: a[o + 1], z: a[o + 2], w: a[o + 3]) }
+                g = k.apply(extent: ext, arguments: [g, v4(f.mixHue, 0), v4(f.mixHue, 4), v4(f.mixSat, 0), v4(f.mixSat, 4),
+                                                     v4(f.mixLum, 0), v4(f.mixLum, 4)]) ?? g
+            }
+            if f.gradingOn, let k = Kernels.grade {
+                g = k.apply(extent: ext, arguments: [g, Kernels.tint(f.cgShHue, f.cgShSat), Kernels.tint(f.cgMidHue, f.cgMidSat),
+                                                     Kernels.tint(f.cgHiHue, f.cgHiSat), f.cgBalance]) ?? g
+            }
+            img = g.applyingFilter("CISRGBToneCurveToLinear")
+        }
         // 2. Creative filters, in the order the user stacked them (top of the list runs first).
         for id in f.order {
             switch id {
@@ -405,6 +713,30 @@ enum DetailFilterEngine {
             case "bloom":
                 guard f.bloomOn, f.blAmount > 0 else { continue }
                 img = bloom(img, f, unit: unit, extent: ext)
+            case "glow":
+                guard f.glowOn, f.ggGlow > 0, let k = Kernels.glow else { continue }
+                let g = img.applyingFilter("CILinearToSRGBToneCurve")
+                let b = g.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 10 * unit]).cropped(to: ext)
+                var out = k.apply(extent: ext, arguments: [g, b, f.ggGlow, f.ggWarmth]) ?? g
+                if f.ggSaturation != 0 {
+                    out = out.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: max(0, 1 + f.ggSaturation),
+                                                                             kCIInputContrastKey: 1, kCIInputBrightnessKey: 0])
+                }
+                img = out.applyingFilter("CISRGBToneCurveToLinear")
+            case "blur":
+                guard f.blurOn, f.bzMix > 0, let k = Kernels.blurMix else { continue }
+                let g = img.applyingFilter("CILinearToSRGBToneCurve")
+                let r = (0.5 + 40 * pow(min(1, max(0, f.bzSize)), 1.6)) * unit
+                let b = g.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: r]).cropped(to: ext)
+                img = (k.apply(extent: ext, arguments: [g, b, min(1, max(0, f.bzMix)), f.bzKind == 1 ? 1.0 : 0.0]) ?? g)
+                    .applyingFilter("CISRGBToneCurveToLinear")
+            case "skin":
+                guard f.skinOn, f.skAmount > 0, let k = Kernels.skin else { continue }
+                let g = img.applyingFilter("CILinearToSRGBToneCurve")
+                let cell = (1.2 + 5.5 * min(1, max(0, f.skSize))) * unit
+                img = (k.apply(extent: ext, arguments: [g, min(1.5, f.skAmount), cell, min(1, max(0, f.skFine)),
+                                                        min(1, max(0, f.skFreckles)), f.skSeed]) ?? g)
+                    .applyingFilter("CISRGBToneCurveToLinear")
             case "grain":
                 guard f.grainOn else { continue }
                 // Film grain: random noise blown up to the grain size (relative to the picture, so the
@@ -1003,7 +1335,7 @@ final class AppModel: ObservableObject {
         showFilters = d.object(forKey: "showFilters") as? Bool ?? true
         adjustCollapsed = d.bool(forKey: "adjustCollapsed")
         faceFix = d.bool(forKey: "faceFix")
-        faceModel = d.string(forKey: "faceModel") ?? "restoreformer"
+        faceModel = d.string(forKey: "faceModel") ?? "codeformer"
         // 0% would skip every face (and looked like "no faces found"): the knob starts at 10%, like Studio's slider.
         faceStrength = max(0.1, d.object(forKey: "faceStrength") as? Double ?? 0.8)
         if (d.object(forKey: "faceStrength") as? Double ?? 0.8) < 0.1 { faceStrength = 0.8 }
@@ -1408,6 +1740,8 @@ final class AppModel: ObservableObject {
         var params = job.settings.params(maxSide: job.maxSide)
         let face: [String: Any]? = job.faceFix
             ? ["model": job.faceModel, "strength": job.faceStrength, "fidelity": job.faceFidelity] : nil
+        let detail: [String: Any]? = job.settings.faceDetailActive
+            ? ["strength": job.settings.faceDetailStrength, "hair": job.settings.faceDetailHair] : nil
         let preFilter = filterStage == "before" && filters.anyOn
         items[i].filtersBaked = preFilter
         items[i].message = preFilter ? "Applying filters…" : "Preparing image…"
@@ -1420,7 +1754,7 @@ final class AppModel: ObservableObject {
             var faces: [[[Double]]] = []
             if let cg = ImageIOHelpers.cgImage(src, maxPixel: 3072),
                let clean = preFilter ? DetailFilterEngine.render(f, cg) : DetailFilterEngine.toSRGB(cg) {
-                if face != nil { faces = FaceFinder.landmarks(clean) }
+                if face != nil || detail != nil { faces = FaceFinder.landmarks(clean) }
                 let tmp = Self.tempDir.appendingPathComponent("input-\(UUID().uuidString.prefix(8)).png")
                 if (try? DetailFilterEngine.write(clean, to: tmp, type: .png)) != nil { input = tmp.path }
             }
@@ -1434,12 +1768,16 @@ final class AppModel: ObservableObject {
                         self.finishItem()
                         return
                     }
+                    if var detail, !faces.isEmpty {
+                        detail["faces"] = faces
+                        params["face_detail"] = detail
+                    }
                     if var face {
                         face["faces"] = faces
                         params["face_fix"] = face
-                        if let j = self.index(of: itemID) {
-                            self.items[j].message = faces.isEmpty ? "No face found to fix" : "Found \(faces.count) face\(faces.count == 1 ? "" : "s")"
-                        }
+                    }
+                    if face != nil || detail != nil, let j = self.index(of: itemID) {
+                        self.items[j].message = faces.isEmpty ? "No face found" : "Found \(faces.count) face\(faces.count == 1 ? "" : "s")"
                     }
                     self.engine.send(["id": id, "cmd": "enhance", "input": input, "output": out.path, "params": params])
                 }
@@ -1524,6 +1862,9 @@ final class AppModel: ObservableObject {
             items[i].seconds = secs
             items[i].message = "Done in \(Fmt.duration(secs))"
             items[i].facesFixed = nil
+            if let n = (msg["faces_detailed"] as? NSNumber)?.intValue, n > 0 {
+                items[i].message += " · \(n) face\(n == 1 ? "" : "s") detailed"
+            }
             if (items[i].job?.faceFix ?? faceFix), let n = (msg["faces_fixed"] as? NSNumber)?.intValue {
                 items[i].facesFixed = n
                 items[i].message += n == 0 ? " · no faces found" : " · \(n) face\(n == 1 ? "" : "s") fixed"
@@ -1803,13 +2144,18 @@ final class AppModel: ObservableObject {
     /// Short name for the current settings: the lit preset, else a summary of the knobs.
     var settingsLabel: String {
         if let u = userPresets.first(where: { userPresetMatches($0) }) { return u.name }
-        if let p = activePreset { return p + (settings.likeness > 0 ? " +likeness" : "") + (faceFix ? " +face" : "") }
+        if let p = activePreset {
+            return p + (settings.likeness > 0 ? " +likeness" : "") + (settings.faceDetailActive ? " +detail" : "")
+                + (faceFix ? " +face" : "") + (settings.keepTones ? "" : " -tones")
+        }
         let s = settings
         if s.mode == "instant" { return "INSTANT" }
         var parts = [String(format: "C%.2f R%.2f", s.creativity, s.resemblance)]
         if s.turbo { parts.append("turbo") }
         if s.likeness > 0 { parts.append(String(format: "L%.0f%%", s.likeness * 100)) }
+        if s.faceDetailActive { parts.append(String(format: "FD%.0f%%", s.faceDetailStrength * 100)) }
         if faceFix { parts.append(faceModel == "codeformer" ? "CF" : "RF") }
+        if !s.keepTones { parts.append("raw-tones") }
         return parts.joined(separator: " ")
     }
 
@@ -2115,8 +2461,8 @@ struct CompareView: View {
         let vis = r.intersection(CGRect(origin: .zero, size: size))
         let x = vis.minX + vis.width * split
         return ZStack(alignment: .topLeading) {
-            picture(before, r)
             picture(after, r)
+            picture(before, r)   // Before on the left of the divider, After on the right
                 .mask(alignment: .topLeading) { Rectangle().frame(width: max(0, x), height: size.height) }
             Rectangle().fill(.white).frame(width: 2, height: vis.height)
                 .shadow(radius: 2)
@@ -2125,8 +2471,8 @@ struct CompareView: View {
                 .overlay(Image(systemName: "arrow.left.and.right").font(.system(size: 12, weight: .bold))
                     .foregroundStyle(.black))
                 .position(x: x, y: vis.midY)
-            Text("After").pill().position(x: vis.minX + 34, y: vis.minY + 22)
-            Text("Before").pill().position(x: vis.maxX - 38, y: vis.minY + 22)
+            Text("Before").pill().position(x: vis.minX + 38, y: vis.minY + 22)
+            Text("After").pill().position(x: vis.maxX - 34, y: vis.minY + 22)
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
         .clipped()
@@ -2942,6 +3288,8 @@ enum Guide: Equatable {
     case filterStage, bleach, dark, extract, viewMode, filtersKey, light, color, grain, bloom, facePreset
     case creativity, resemblance, hdr, steps, decay, solver, seed, prompt, negative
     case faceFix, faceModel, faceStrength, faceFidelity, zoom, likeness, myPresets, addQueue, autoSave
+    case keepTones, faceDetail, faceDetailStrength, faceDetailHair
+    case presence, mixer, grading, glow, blurFilter, skin
 
     var title: String {
         switch self {
@@ -2989,6 +3337,16 @@ enum Guide: Equatable {
         case .myPresets: return "My presets"
         case .addQueue: return "+ Queue"
         case .autoSave: return "Auto-save"
+        case .keepTones: return "Keep Tones"
+        case .faceDetail: return "Face Detail"
+        case .faceDetailStrength: return "Face Detail strength"
+        case .faceDetailHair: return "Face Detail · Hair"
+        case .presence: return "Presence"
+        case .mixer: return "Color Mixer"
+        case .grading: return "Color Grading"
+        case .glow: return "Glamour Glow"
+        case .blurFilter: return "Blur"
+        case .skin: return "Skin Texture"
         }
     }
 
@@ -3033,7 +3391,7 @@ enum Guide: Equatable {
         case .extract:
             return "Detail Extractor: pulls out texture everywhere for an HDR-like, illustrated look. Radius: FINE for small texture, COARSE for big shapes."
         case .filtersKey:
-            return "Shows or hides the Adjust panel beside the picture: Camera Raw-style Light and Color sliders, plus the Detail Extractor, Dark Contrasts, Bleach Bypass, Bloom and Film Grain filters."
+            return "Shows or hides the Adjust panel beside the picture: Camera Raw-style Light, Color, Presence, Color Mixer and Color Grading, plus the Detail Extractor, Dark Contrasts, Bleach Bypass, Glamour Glow, Bloom, Blur, Skin Texture and Film Grain filters."
         case .bloom:
             return "Bloom, like Procreate's: the bright parts of the picture spill soft light around themselves. Amount = how strong, Transition = how much counts as bright (low = only the brightest highlights), Size = how far the light spreads, Burn = from a soft screen glow to light that can blow out to white."
         case .facePreset:
@@ -3045,7 +3403,7 @@ enum Guide: Equatable {
         case .color:
             return "Temperature (cooler ↔ warmer), Tint (green ↔ magenta), Vibrance (boosts muted colors, protects skin) and Saturation (all colors). Double-click a slider to reset it."
         case .viewMode:
-            return "SINGLE shows the result (click it to flip to the original and back). SPLIT has a divider you drag anywhere. SIDE shows both side by side."
+            return "SINGLE shows the result (click it to flip to the original and back). SPLIT has a divider you drag anywhere: Before on the left, After on the right. SIDE shows both side by side."
         case .creativity:
             return "How much new detail the AI may invent. Low (0.2) is gentle cleanup that stays true to the original. High (0.6+) adds lots of texture but can change faces or text. 0.35 is the sweet spot."
         case .resemblance:
@@ -3067,7 +3425,7 @@ enum Guide: Equatable {
         case .faceFix:
             return "Finds every face and restores it after the enhance: cleaner eyes, teeth and skin, fixing the warped faces AI detail can cause. Blended in with a soft edge. The first use downloads the face model once."
         case .faceModel:
-            return "RESTORE (RestoreFormer): natural and faithful, the default. CODE (CodeFormer): stronger repair for blurry or damaged faces, with a Fidelity knob. CodeFormer's licence allows non-commercial use only."
+            return "CODE (CodeFormer, the default): strong repair for blurry or damaged faces, with a Fidelity knob; its licence allows non-commercial use only. RESTORE (RestoreFormer): natural and faithful, fine for commercial use."
         case .faceStrength:
             return "How much of the restored face is used. 100% = fully restored; lower blends back toward the enhanced face for a subtler, more natural result. 70–80% suits most photos."
         case .faceFidelity:
@@ -3080,6 +3438,26 @@ enum Guide: Equatable {
             return "Try several versions: + QUEUE adds this photo again with the current settings. Change the knobs (or pick a preset) and + QUEUE again, then press ENHANCE to run them all. Each result is saved with its settings in the file name."
         case .autoSave:
             return "On: every finished result is saved straight to your save folder (the Desktop unless you changed it), so you never have to hunt for it. Off: press SAVE yourself. In Overwrite mode results are never saved over your photo without SAVE."
+        case .keepTones:
+            return "On (recommended): after the AI adds detail, your photo's own brightness and colour are put back, so the result never comes out lighter or with shifted colours; all the new fine detail stays. Off: keep the AI's own light and colour (it often brightens a little)."
+        case .faceDetail:
+            return "Like Protoart Studio's face detailer: after the enhance, each face is cut out with some room around it, redrawn close up at 512–768 px by the same AI, colour-matched and blended back with a soft edge. Small or distant faces get real eyes, lips and skin. Adds roughly 10–30 s per face. Runs before Face Fix, so you can use both. Not used by INSTANT. Turn it off with the switch."
+        case .faceDetailStrength:
+            return "How much the close-up may change each face. 20–30% (the default is 25%) sharpens and adds detail while keeping the person; 40–60% redraws more and can change the look. The face's own shapes always guide the redraw, and it's matched to its surroundings."
+        case .faceDetailHair:
+            return "Off: only the face (forehead to chin) is redrawn. On: the hair above and beside the face is redrawn too, for portraits where the hair looks soft."
+        case .presence:
+            return "Like Camera Raw's Presence and Effects: Texture (fine detail such as skin and foliage, not edges), Clarity (mid-tone punch over larger areas), Dehaze (+ removes haze and mist, − adds a soft veil), Sharpen (fine edges) and Vignette (+ darkens, − lightens the corners). Double-click a slider to reset it."
+        case .mixer:
+            return "Like Camera Raw's Color Mixer: pick a colour band, then shift its Hue, Saturation and Luminance. Neighbouring colours blend smoothly; greys are left alone. RESET clears every band."
+        case .grading:
+            return "Like Camera Raw's Color Grading: tint the Shadows, Midtones and Highlights with any hue (Hue picks the colour, Amount how strong). Balance moves the split between shadows and highlights. Brightness is kept; only the colour changes."
+        case .glow:
+            return "Glamour Glow (Nik Color Efex): a soft, flattering glow over the picture. Glow = how strong, Saturation = colour of the glow, Warmth = warmer or cooler skin."
+        case .blurFilter:
+            return "Blur: softens the picture. Size = how far, Mix = how much of the blur is used. SOFT FOCUS screens the blur over the picture so it glows instead of smearing (a dreamy portrait look)."
+        case .skin:
+            return "Skin Texture: adds natural pores, fine bumps and optional freckles to smooth, plastic-looking AI skin. It only shades (no new colours), most in the mid-tones. Pattern changes the random layout. Tip: use it low (20–40%)."
         case .zoom:
             return "Scroll the mouse wheel (or two fingers on a trackpad) over the picture to zoom smoothly toward the pointer; pinch works too. Drag to look around. FIT shows the whole picture."
         }
@@ -3401,6 +3779,15 @@ struct ControlsPanel: View {
                             .guide(.hdr)
                     }
                     .frame(maxWidth: .infinity)
+                    HStack(alignment: .center, spacing: 10) {
+                        ToggleSwitch(label: "Keep Tones", off: "Off", on: "On", isOn: $model.settings.keepTones,
+                                     help: "On: the result keeps your photo's own light and colour; only the new detail is added")
+                            .guide(.keepTones)
+                        EngravedLabel(model.settings.keepTones ? "On · photo's own light & colour"
+                                                               : "Off · the AI's own light", size: 10)
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                        Spacer(minLength: 0)
+                    }
                 }
 
                 Module(title: "Likeness") {
@@ -3420,6 +3807,28 @@ struct ControlsPanel: View {
                         }
                         Spacer(minLength: 0)
                     }
+                }
+
+                Module(title: "Face Detail") {
+                    let instant = model.settings.mode == "instant"
+                    HStack(alignment: .center, spacing: 6) {
+                        ToggleSwitch(label: "Face Detail", off: "Off", on: "On", isOn: $model.settings.faceDetail,
+                                     help: "Redraw each face close up with the same AI, so small faces get real detail")
+                            .guide(.faceDetail)
+                        Knob(label: "Strength", value: $model.settings.faceDetailStrength, range: 0.1...0.6, step: 0.05,
+                             display: { "\(Int(($0 * 100).rounded()))%" },
+                             help: "How much the close-up may change the face. 20–30% sharpens and keeps the person; higher redraws more.")
+                            .guide(.faceDetailStrength)
+                        ToggleSwitch(label: "Hair", off: "Off", on: "On", isOn: $model.settings.faceDetailHair,
+                                     help: "Also redraw the hair around the face")
+                            .guide(.faceDetailHair)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .disabled(instant)
+                    .opacity(model.settings.faceDetail && !instant ? 1 : 0.75)
+                    EngravedLabel(instant ? "Not used by INSTANT · pick an AI preset"
+                                  : (model.settings.faceDetail ? "On · each face redrawn close up, then blended in"
+                                                               : "Off · no download needed"), size: 10)
                 }
 
                 Module(title: "Face Fix") {
@@ -3540,19 +3949,22 @@ struct Fader: View {
     @Binding var value: Double
     var range: ClosedRange<Double> = -1...1
     var format: (Double) -> String = { String(format: "%+.0f", $0 * 100) }
+    var home: Double = 0          // reset value (double-click) and where the lit span starts
+    var showHome = false          // show the value even when it's at home (hue sliders)
     @State private var dragStart: Double?
 
     private var norm: Double { (value - range.lowerBound) / (range.upperBound - range.lowerBound) }
-    private var zeroNorm: Double { (0 - range.lowerBound) / (range.upperBound - range.lowerBound) }
+    private var zeroNorm: Double { (home - range.lowerBound) / (range.upperBound - range.lowerBound) }
+    private var atHome: Bool { value == home }
 
     var body: some View {
         VStack(spacing: 3) {
             HStack {
-                Text(label).font(.system(size: 12)).foregroundStyle(Color(white: value == 0 ? 0.75 : 0.95))
+                Text(label).font(.system(size: 12)).foregroundStyle(Color(white: atHome ? 0.75 : 0.95))
                 Spacer()
-                Text(value == 0 ? "0" : format(value))
+                Text(atHome && !showHome ? "0" : format(value))
                     .font(Console.mono(11))
-                    .foregroundStyle(value == 0 ? Color(white: 0.55) : Console.amber)
+                    .foregroundStyle(atHome ? Color(white: 0.55) : Console.amber)
                     .frame(width: 44, alignment: .trailing)
             }
             GeometryReader { g in
@@ -3579,10 +3991,10 @@ struct Fader: View {
                 .gesture(DragGesture(minimumDistance: 0).onChanged { d in
                     let t = min(1, max(0, d.location.x / max(w, 1)))
                     var v = range.lowerBound + t * (range.upperBound - range.lowerBound)
-                    if abs(v) < (range.upperBound - range.lowerBound) * 0.015 { v = 0 } // snap to 0
+                    if abs(v - home) < (range.upperBound - range.lowerBound) * 0.015 { v = home } // snap home
                     value = (v * 100).rounded() / 100
                 })
-                .simultaneousGesture(TapGesture(count: 2).onEnded { value = 0 })
+                .simultaneousGesture(TapGesture(count: 2).onEnded { value = home })
             }
             .frame(height: 16)
         }
@@ -3635,6 +4047,22 @@ struct FilterPanel: View {
     @State private var open: String? = nil
     @State private var lightOpen = true
     @State private var colorOpen = false
+    @State private var presenceOpen = false
+    @State private var mixerOpen = false
+    @State private var gradingOpen = false
+    @State private var mixBand = 0
+    private static let bands: [(String, Color)] = [
+        ("Red", Color(red: 0.9, green: 0.2, blue: 0.2)), ("Orange", Color(red: 0.95, green: 0.55, blue: 0.15)),
+        ("Yellow", Color(red: 0.95, green: 0.85, blue: 0.2)), ("Green", Color(red: 0.3, green: 0.75, blue: 0.3)),
+        ("Aqua", Color(red: 0.2, green: 0.8, blue: 0.8)), ("Blue", Color(red: 0.25, green: 0.45, blue: 0.95)),
+        ("Purple", Color(red: 0.6, green: 0.35, blue: 0.9)), ("Magenta", Color(red: 0.9, green: 0.3, blue: 0.75)),
+    ]
+
+    private func band(_ kp: WritableKeyPath<DetailFilters, [Double]>) -> Binding<Double> {
+        let b = mixBand
+        return Binding(get: { model.filters[keyPath: kp][b] }, set: { model.filters[keyPath: kp][b] = $0 })
+    }
+    private func deg(_ x: Double) -> String { String(format: "%.0f°", x) }
 
     private func v(_ kp: WritableKeyPath<DetailFilters, Double>) -> Binding<Double> {
         Binding(get: { model.filters[keyPath: kp] }, set: { model.filters[keyPath: kp] = $0 })
@@ -3642,8 +4070,10 @@ struct FilterPanel: View {
     private func pct(_ x: Double) -> String { String(format: "%+.0f%%", x * 100) }
     private func pct0(_ x: Double) -> String { String(format: "%.0f%%", x * 100) }
     private var activeCount: Int {
-        [model.filters.lightOn, model.filters.colorOn, model.filters.bleachOn, model.filters.darkOn,
-         model.filters.extractOn, model.filters.grainOn, model.filters.bloomOn].filter { $0 }.count
+        [model.filters.lightOn, model.filters.colorOn, model.filters.presenceOn, model.filters.mixerOn,
+         model.filters.gradingOn, model.filters.bleachOn, model.filters.darkOn, model.filters.extractOn,
+         model.filters.grainOn, model.filters.bloomOn, model.filters.glowOn, model.filters.blurOn,
+         model.filters.skinOn].filter { $0 }.count
     }
     private let grid = [GridItem(.flexible(), spacing: 2), GridItem(.flexible(), spacing: 2)]
 
@@ -3709,6 +4139,51 @@ struct FilterPanel: View {
                     Knob(label: "Transition", value: v(\.blTransition), range: 0...1, step: 0.05, display: pct0, size: 0.82)
                     Knob(label: "Size", value: v(\.blSize), range: 0...1, step: 0.05, display: pct0, size: 0.82)
                     Knob(label: "Burn", value: v(\.blBurn), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                }
+            }
+        case "glow":
+            FilterRow(id: "glow", title: "Glamour Glow", isOn: $model.filters.glowOn, open: $open,
+                      guide: .glow, position: pos, count: total, onMove: { move("glow", $0) }, onReset: {
+                model.filters.ggGlow = 0.5; model.filters.ggSaturation = 0; model.filters.ggWarmth = 0
+            }) {
+                LazyVGrid(columns: grid, spacing: 6) {
+                    Knob(label: "Glow", value: v(\.ggGlow), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                    Knob(label: "Saturation", value: v(\.ggSaturation), range: -1...1, step: 0.05, display: pct, size: 0.82)
+                    Knob(label: "Warmth", value: v(\.ggWarmth), range: -1...1, step: 0.05, display: pct, size: 0.82)
+                }
+            }
+        case "blur":
+            FilterRow(id: "blur", title: "Blur", isOn: $model.filters.blurOn, open: $open,
+                      guide: .blurFilter, position: pos, count: total, onMove: { move("blur", $0) }, onReset: {
+                model.filters.bzSize = 0.3; model.filters.bzMix = 1; model.filters.bzKind = 0
+            }) {
+                LazyVGrid(columns: grid, spacing: 6) {
+                    Knob(label: "Size", value: v(\.bzSize), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                    Knob(label: "Mix", value: v(\.bzMix), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                    ToggleSwitch(label: "Kind", off: "Blur", on: "Soft", isOn: Binding(
+                        get: { model.filters.bzKind == 1 }, set: { model.filters.bzKind = $0 ? 1 : 0 }),
+                                 help: "Soft focus: the blur glows over the picture instead of smearing it")
+                        .frame(maxHeight: .infinity)
+                }
+            }
+        case "skin":
+            FilterRow(id: "skin", title: "Skin Texture", isOn: $model.filters.skinOn, open: $open,
+                      guide: .skin, position: pos, count: total, onMove: { move("skin", $0) }, onReset: {
+                model.filters.skAmount = 0.5; model.filters.skSize = 0.35; model.filters.skFine = 0.5
+                model.filters.skFreckles = 0; model.filters.skSeed = 0
+            }) {
+                LazyVGrid(columns: grid, spacing: 6) {
+                    Knob(label: "Amount", value: v(\.skAmount), range: 0...1.5, step: 0.05, display: pct0, size: 0.82)
+                    Knob(label: "Pore Size", value: v(\.skSize), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                    Knob(label: "Fine Texture", value: v(\.skFine), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                    Knob(label: "Freckles", value: v(\.skFreckles), range: 0...1, step: 0.05, display: pct0, size: 0.82)
+                }
+                HStack {
+                    EngravedLabel("Pattern \(Int(model.filters.skSeed))", size: 10)
+                    Spacer()
+                    Button("NEW PATTERN") { model.filters.skSeed = Double(Int.random(in: 1...999)) }
+                        .buttonStyle(MetalButtonStyle())
+                        .help("A different random layout of pores")
                 }
             }
         default:
@@ -3816,6 +4291,61 @@ struct FilterPanel: View {
                         Fader(label: "Saturation", value: v(\.saturation))
                     }
                     .guide(.color)
+                    AdjustSection(title: "Presence", expanded: $presenceOpen, active: model.filters.presenceOn,
+                                  onReset: { model.filters.resetPresence() }) {
+                        Fader(label: "Texture", value: v(\.texture))
+                        Fader(label: "Clarity", value: v(\.clarity))
+                        Fader(label: "Dehaze", value: v(\.dehaze))
+                        Fader(label: "Sharpen", value: v(\.sharpen), range: 0...1,
+                              format: { String(format: "%.0f", $0 * 100) })
+                        Fader(label: "Vignette", value: v(\.vignette))
+                    }
+                    .guide(.presence)
+                    AdjustSection(title: "Color Mixer", expanded: $mixerOpen, active: model.filters.mixerOn,
+                                  onReset: { model.filters.resetMixer() }) {
+                        HStack(spacing: 4) {
+                            ForEach(0..<8, id: \.self) { i in
+                                let b = Self.bands[i]
+                                let used = model.filters.mixHue[i] != 0 || model.filters.mixSat[i] != 0 || model.filters.mixLum[i] != 0
+                                Button { mixBand = i } label: {
+                                    Circle().fill(b.1)
+                                        .frame(width: 18, height: 18)
+                                        .overlay(Circle().strokeBorder(mixBand == i ? Color.white : Color.black.opacity(0.5),
+                                                                       lineWidth: mixBand == i ? 2 : 1))
+                                        .overlay(alignment: .topTrailing) {
+                                            if used { Circle().fill(Console.amber).frame(width: 6, height: 6) }
+                                        }
+                                        .contentShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .help(b.0 + (used ? " (changed)" : ""))
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        EngravedLabel(Self.bands[mixBand].0, size: 11, onDark: true)
+                        Fader(label: "Hue", value: band(\.mixHue), format: { String(format: "%+.0f°", $0 * 30) })
+                        Fader(label: "Saturation", value: band(\.mixSat))
+                        Fader(label: "Luminance", value: band(\.mixLum))
+                    }
+                    .guide(.mixer)
+                    AdjustSection(title: "Color Grading", expanded: $gradingOpen, active: model.filters.gradingOn,
+                                  onReset: { model.filters.resetGrading() }) {
+                        ForEach([("Shadows", \DetailFilters.cgShHue, \DetailFilters.cgShSat, 220.0),
+                                 ("Midtones", \DetailFilters.cgMidHue, \DetailFilters.cgMidSat, 30.0),
+                                 ("Highlights", \DetailFilters.cgHiHue, \DetailFilters.cgHiSat, 40.0)], id: \.0) { row in
+                            HStack(spacing: 6) {
+                                Circle().fill(Color(hue: model.filters[keyPath: row.1] / 360, saturation: 0.8, brightness: 0.9))
+                                    .frame(width: 10, height: 10)
+                                    .opacity(model.filters[keyPath: row.2] > 0 ? 1 : 0.35)
+                                EngravedLabel(row.0, size: 11, onDark: true)
+                            }
+                            Fader(label: "Hue", value: v(row.1), range: 0...360, format: deg, home: row.3, showHome: true)
+                            Fader(label: "Amount", value: v(row.2), range: 0...1,
+                                  format: { String(format: "%.0f", $0 * 100) })
+                        }
+                        Fader(label: "Balance", value: v(\.cgBalance))
+                    }
+                    .guide(.grading)
                     HStack(spacing: 8) {
                         EngravedLabel("Detail", size: 11, onDark: true)
                         VStack(spacing: 0) {
@@ -4546,9 +5076,15 @@ enum HelpContent {
             "Set the knobs the way you like, then press **+ SAVE** under **My presets** and give it a name. Tick **Include Adjust & filters** to keep your Light, Color and filter settings too.",
             "Click a preset to use it (its key lights up while the knobs match). Right-click it to **update** it with the current settings, **rename** it or **delete** it.",
         ]),
+        ("Face Detail", [
+            "Turn **Face Detail** on to redraw every face close up after the enhance (like Protoart Studio's face detailer, or ADetailer): each face is cut out with some room around it, redrawn at 512–768 px by the same AI, matched to the light and colour around it, and blended back through a soft oval. Small or distant faces get real eyes, lips and skin instead of mush.",
+            "**Strength** sets how much each face may change: 20–30% (default 25%) sharpens and keeps the person, 40–60% redraws more. **Hair** on also redraws the hair around the face. It adds roughly 10–30 seconds per face and needs no download. It isn't used by INSTANT. Turn it off with its switch.",
+            "It runs before Face Fix, so you can use both: Face Detail adds detail, then Face Fix tidies eyes and teeth.",
+        ]),
         ("Face Fix", [
             "Turn **Face Fix** on to restore faces after the enhance: it finds every face (with macOS's built-in face detection), repairs eyes, teeth and skin, and blends the result back in with a soft edge. Great for fixing faces the AI detail warped, and for old or blurry portraits.",
-            "**RESTORE** (RestoreFormer) is natural and faithful, and is the default. **CODE** (CodeFormer) repairs badly blurred or damaged faces more strongly. Its **Fidelity** knob trades a cleaner face (low) for keeping the person's own features (high, 0.7+).",
+            "**CODE** (CodeFormer, the default) repairs badly blurred or damaged faces more strongly. Its **Fidelity** knob trades a cleaner face (low) for keeping the person's own features (high, 0.7+). **RESTORE** (RestoreFormer) is the natural, faithful alternative with a commercial-friendly licence.",
+            "The restored face keeps the photo's own light and colour, so it never shows as a lighter or pinker patch.",
             "**Strength** blends the restored face with the original: 70–80% looks the most natural.",
             "**CodeFormer presets** (the same as Protoart Studio's) set everything in one click: **BALANCED** for most portraits, **LIKENESS** for real people, **HEAVY** for distorted or tiny faces, **SUBTLE** keeps skin texture, **OLD PHOTO** for scans, **GENTLE** for faces that only need a polish.",
             "The first time you use each model it downloads once (RestoreFormer about 280 MB, CodeFormer about 360 MB), checked against a fingerprint like the other models. CodeFormer's licence allows **non-commercial use only**.",
@@ -4558,6 +5094,7 @@ enum HelpContent {
             "**Creativity**: how much new detail the AI may invent (0.35 is the sweet spot).",
             "**Resemblance**: how strictly it follows the original's shapes. Higher = more faithful.",
             "**HDR**: punch of the new detail (no effect in Turbo).",
+            "**Keep Tones** (on by default): after the AI adds detail, your photo's own brightness and colour are put back, so results don't come out lighter or with shifted colours. All the new fine detail stays. Turn it off to keep the AI's own light and colour.",
             "**Steps / Solver / Decay / Seed / Prompt**: fine-tuning for advanced users. **RESET** restores defaults.",
             "Drag a knob up or right to turn it clockwise. Hover over anything to see an explanation in the amber Guide strip.",
         ]),
@@ -4567,6 +5104,8 @@ enum HelpContent {
         ("Light and Color (like Camera Raw)", [
             "The **Adjust** panel left of the picture starts with Lightroom/Camera Raw-style sliders. **Light**: Exposure, Contrast, Highlights, Shadows, Whites, Blacks. **Color**: Temperature, Tint, Vibrance, Saturation.",
             "Drag a slider (it snaps to 0 in the middle); **double-click** it to reset. Each section's **RESET** clears it. They apply before the detail filters and preview live.",
+            "**Presence**: **Texture** (fine detail such as skin and foliage), **Clarity** (mid-tone punch over larger areas), **Dehaze** (+ removes haze, − adds a soft veil), **Sharpen** and **Vignette** (+ darker, − lighter corners).",
+            "**Color Mixer**: click a colour dot, then shift that colour's **Hue**, **Saturation** and **Luminance** (an amber dot marks changed colours). **Color Grading**: tint the **Shadows**, **Midtones** and **Highlights** (Hue + Amount); **Balance** moves the split. Grading changes colour, not brightness.",
         ]),
         ("Detail filters", [
             "Looks inspired by Color Efex Pro's Detail filters, below Light and Color in the **Adjust** panel (show or hide it with the **ADJUST** key next to the view keys).",
@@ -4574,6 +5113,7 @@ enum HelpContent {
             "**Click a filter's name** to apply it and open its knobs; click again to fold it away (it stays applied). The **checkbox** turns a filter on or off. Knobs only adjust a filter; they never switch it on. The screen previews everything live.",
             "**Bleach Bypass**: silvery, contrasty, half-desaturated film look. **Dark Contrasts**: deeper, moodier tones with crisp mid-tones. **Detail Extractor**: pulls out texture everywhere (FINE / NORMAL / COARSE radius).",
             "**Bloom** (like Procreate's): the bright parts glow and spill soft light around themselves. **Amount** = strength, **Transition** = how much counts as bright, **Size** = how far the light spreads, **Burn** = from a soft glow to light that blows out to white.",
+            "**Glamour Glow**: a soft, flattering glow (Glow, Saturation, Warmth). **Blur**: softens the picture; **Soft** focus makes the blur glow instead of smear. **Skin Texture**: adds natural pores, fine bumps and optional freckles to smooth AI skin (keep it low, 20–40%; NEW PATTERN changes the layout).",
             "**Film Grain** adds photographic grain (Intensity, Grain Size, Softness, Mono or Color).",
             "Filters are applied **top to bottom**: use the **▲▼** buttons on a filter to restack it (e.g. grain usually goes last). Light and Color always run first. **RESET** turns everything off and restores the default order.",
         ]),
@@ -4584,7 +5124,7 @@ enum HelpContent {
         ]),
         ("Views", [
             "**SINGLE**: the result; click the picture to flip to the original and back.",
-            "**SPLIT**: drag anywhere on the picture to move the divider (After on the left, Before on the right).",
+            "**SPLIT**: drag anywhere on the picture to move the divider (Before on the left, After on the right).",
             "**SIDE**: original and result side by side.",
             "**Zoom** by scrolling the **mouse wheel** (or two fingers on a trackpad) over the picture: it zooms smoothly toward the pointer, up to 400% of actual pixels. Pinch works too, and the keys in the corner jump to **FIT**, **100%** (one image pixel per screen pixel) and **200%**. Drag to look around while zoomed; in SPLIT, drag near the divider to move it. All three views keep the same zoom.",
         ]),
@@ -4642,11 +5182,87 @@ enum HelpContent {
 
 // MARK: - App
 
+/// `ProtoArt Beautify --selftest-filters <report.txt>`: renders every Adjust step on a test picture and writes
+/// whether its kernel compiled, how much it changed the picture and how long it took (preview and full size).
+enum FilterSelfTest {
+    static func run(report path: String) {
+        var lines = ["ProtoArt Beautify filter self-test"]
+        func kernel(_ name: String, _ k: CIColorKernel?) { lines.append("kernel \(name): \(k == nil ? "FAILED" : "ok")") }
+        kernel("local", Kernels.local); kernel("dehaze", Kernels.dehaze); kernel("vignette", Kernels.vignette)
+        kernel("mixer", Kernels.mixer); kernel("grade", Kernels.grade); kernel("glow", Kernels.glow)
+        kernel("blur", Kernels.blurMix); kernel("skin", Kernels.skin)
+        func testImage(_ w: Int, _ h: Int) -> CGImage {
+            let rect = CGRect(x: 0, y: 0, width: w, height: h)
+            let grad = CIFilter(name: "CILinearGradient", parameters: [
+                "inputPoint0": CIVector(x: 0, y: 0), "inputPoint1": CIVector(x: CGFloat(w), y: CGFloat(h)),
+                "inputColor0": CIColor(red: 0.1, green: 0.3, blue: 0.7), "inputColor1": CIColor(red: 0.95, green: 0.7, blue: 0.4)])!
+                .outputImage!.cropped(to: rect)
+            let noise = CIFilter(name: "CIRandomGenerator")!.outputImage!
+                .transformed(by: CGAffineTransform(scaleX: 6, y: 6)).cropped(to: rect)
+                .applyingFilter("CIColorMatrix", parameters: [
+                    "inputRVector": CIVector(x: 0.25, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: 0.25, z: 0, w: 0),
+                    "inputBVector": CIVector(x: 0, y: 0, z: 0.25, w: 0), "inputBiasVector": CIVector(x: -0.12, y: -0.12, z: -0.12, w: 0)])
+            let img = noise.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: grad]).cropped(to: rect)
+            return DetailFilterEngine.context.createCGImage(img, from: rect, format: .RGBA8, colorSpace: DetailFilterEngine.sRGB)!
+        }
+        func meanDiff(_ a: CGImage, _ b: CGImage) -> Double {
+            func px(_ i: CGImage) -> [UInt8] {
+                let w = 64, h = 64
+                var buf = [UInt8](repeating: 0, count: w * h * 4)
+                let ctx = CGContext(data: &buf, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                    space: DetailFilterEngine.sRGB, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+                ctx.draw(i, in: CGRect(x: 0, y: 0, width: w, height: h))
+                return buf
+            }
+            let x = px(a), y = px(b)
+            var t = 0.0
+            for k in 0..<x.count where k % 4 != 3 { t += abs(Double(x[k]) - Double(y[k])) }
+            return t / Double(x.count / 4 * 3)
+        }
+        var cases: [(String, (inout DetailFilters) -> Void)] = [
+            ("texture", { $0.texture = 0.8 }), ("clarity", { $0.clarity = 0.8 }), ("dehaze+", { $0.dehaze = 0.8 }),
+            ("dehaze-", { $0.dehaze = -0.8 }), ("sharpen", { $0.sharpen = 0.8 }), ("vignette", { $0.vignette = 0.8 }),
+            ("mixer", { $0.mixHue[5] = 1; $0.mixSat[1] = 1; $0.mixLum[5] = -1 }),
+            ("grading", { $0.cgShSat = 1; $0.cgHiSat = 1; $0.cgBalance = 0.3 }),
+            ("glow", { $0.glowOn = true; $0.ggGlow = 0.8; $0.ggWarmth = 0.5 }),
+            ("blur", { $0.blurOn = true; $0.bzSize = 0.5 }), ("softfocus", { $0.blurOn = true; $0.bzKind = 1 }),
+            ("skin", { $0.skinOn = true; $0.skAmount = 1.2; $0.skFreckles = 0.6 }),
+            ("bloom", { $0.bloomOn = true }), ("grain", { $0.grainOn = true }), ("light", { $0.exposure = 0.5; $0.contrast = 0.3 }),
+        ]
+        let parts = cases  // a copy, so "everything" doesn't call itself
+        cases.append(("everything", { f in for c in parts { c.1(&f) } }))
+        for (w, h) in [(1600, 1067), (4000, 2667)] {
+            let base = testImage(w, h)
+            lines.append("-- \(w)x\(h)")
+            for (name, set) in cases {
+                var f = DetailFilters()
+                set(&f)
+                let t0 = Date()
+                guard let out = DetailFilterEngine.render(f, base) else { lines.append("\(name): RENDER FAILED"); continue }
+                let ms = Date().timeIntervalSince(t0) * 1000
+                let d = meanDiff(base, out)
+                lines.append(String(format: "%@: changed %.2f levels, %.0f ms%@", name, d, ms, d < 0.3 ? "  <-- NO VISIBLE CHANGE" : ""))
+            }
+        }
+        // Off really is off: a default (all-off) setting must leave the picture untouched.
+        lines.append("all-off anyOn=\(DetailFilters().anyOn)")
+        try? lines.joined(separator: "\n").write(toFile: path, atomically: true, encoding: .utf8)
+    }
+}
+
 @main
 struct ProtoArtBeautifyApp: App {
     @StateObject private var model = AppModel()
     @StateObject private var guides = GuideCenter()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
+
+    init() {
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--selftest-filters"), i + 1 < args.count {
+            FilterSelfTest.run(report: args[i + 1])
+            exit(0)
+        }
+    }
 
     var body: some Scene {
         Window("ProtoArt Beautify", id: "main") {
