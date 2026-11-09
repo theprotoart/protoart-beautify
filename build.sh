@@ -20,7 +20,7 @@ done
 
 APP_NAME="ProtoArt Beautify"
 BUNDLE_ID="com.protoart.beautify"
-VERSION="1.3.0"
+VERSION="1.3.1"
 PY_VERSION="3.12"
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"

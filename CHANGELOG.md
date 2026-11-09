@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1 — 2026-11-09
+- **Before on the left, After on the right** in the Split view.
+- **Keep Tones** (on by default): the result keeps your photo's own brightness and colour; only the new detail is added (ported from Protoart Studio's "Keep the picture's style"). Results are also tagged sRGB, so Before and After show the same colours.
+- **Face Detail** (off by default, 15% strength): each face is redrawn close up by the same AI, guided by its own shapes, colour-matched and blended back (ported from Protoart Studio's face detailer). Optional Hair.
+- **Face Fix**: restored faces keep the photo's skin tone; CodeFormer is the default model for new users.
+- **Adjust**: Presence (Texture, Clarity, Dehaze, Sharpen, Vignette), Color Mixer, Color Grading, and the Glamour Glow, Blur and Skin Texture filters, ported from Protoart Studio's Adjust. Each has an on/off, a reset and its own guide.
+- Checks: gitleaks (no leaks), OSV dependency audit (clean apart from the Intel-only PyTorch 2.2.2 notes in SECURITY.md), filter self-test (all kernels compile; full preview with every filter on in 0.14 s).
+
 ## 1.3.0 — 2026-10-24
 - **Queue different settings on the same photo**: press **+ QUEUE** (⇧⌘↩) to line up versions; each row shows its settings, and "Use These Settings" brings them back.
 - **My Presets**: save, rename, update and delete your own presets.

@@ -167,10 +167,10 @@ Close memory-heavy apps (browsers with many tabs) for the smoothest runs.
 ## Sharing
 
 `Make Beautify DMG.command` packages `dist/ProtoArt Beautify.app` with an Applications link and
-`Read Me First.txt` into `dist/ProtoArt-Beautify-1.3.dmg` (+ SHA-256).
+`Read Me First.txt` into `dist/ProtoArt-Beautify-1.3.1.dmg` (+ SHA-256).
 
 **Intel Macs:** `Build Intel Version.command` (or `./build.sh --arch x86_64`) builds an x86_64 copy into
-`dist-intel/` from this Apple Silicon Mac and packages `ProtoArt-Beautify-1.3-Intel.dmg`. It runs the AI
+`dist-intel/` from this Apple Silicon Mac and packages `ProtoArt-Beautify-1.3.1-Intel.dmg`. It runs the AI
 on the CPU (PyTorch 2.2.2, the last Intel-Mac release; float32), starts on TURBO, and is much slower:
 INSTANT took ~2 min at 1024 px under Rosetta. `Build Both Versions.command` rebuilds both DMGs.
 PyTorch 2.2.2's `torch.load` weakness (CVE-2025-32434) is covered by SHA-256-pinning every pickle file
