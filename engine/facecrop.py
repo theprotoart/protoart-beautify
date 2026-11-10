@@ -65,3 +65,18 @@ def paste_back(image: Image.Image, new_crop: Image.Image, region: tuple, mask: I
     out = image.copy()
     out.paste(patch, (left, top), m)
     return out
+
+
+def protect_mask(size: tuple, boxes: list, grow: float = 0.35) -> Image.Image:
+    """Protect Faces: a soft white oval over each face (forehead to chin, a little hair and neck), black elsewhere.
+    Like Protoart Studio's Protect from Enhance, but found automatically instead of painted."""
+    w, h = size
+    mask = Image.new("L", (w, h), 0)
+    d = ImageDraw.Draw(mask)
+    feather = 2.0
+    for x1, y1, x2, y2 in boxes:
+        fw, fh = x2 - x1, y2 - y1
+        g = grow * fw
+        d.ellipse([x1 - g, y1 - g * 1.3, x2 + g, y2 + g * 0.8], fill=255)
+        feather = max(feather, fw * 0.12)
+    return mask.filter(ImageFilter.GaussianBlur(min(feather, max(w, h) / 40)))

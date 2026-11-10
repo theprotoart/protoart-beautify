@@ -30,6 +30,7 @@ struct EnhanceSettings: Equatable, Codable {
     var faceDetail = false     // Face Detail: redraw each face close up with the same AI (AI presets only)
     var faceDetailStrength = 0.15
     var faceDetailHair = false
+    var protectFaces = false   // faces skip the AI re-detailing: Face Fix runs first on a clean upscale
 
     init() {}
 
@@ -45,10 +46,14 @@ struct EnhanceSettings: Equatable, Codable {
         likeness = v(.likeness, z.likeness)
         keepTones = v(.keepTones, z.keepTones); faceDetail = v(.faceDetail, z.faceDetail)
         faceDetailStrength = v(.faceDetailStrength, z.faceDetailStrength); faceDetailHair = v(.faceDetailHair, z.faceDetailHair)
+        protectFaces = v(.protectFaces, z.protectFaces)
     }
 
+    /// Protect Faces only matters with the AI (INSTANT doesn't re-detail anything).
+    var protectActive: Bool { protectFaces && mode == "detail" }
+
     /// Face Detail only runs with the AI (not INSTANT).
-    var faceDetailActive: Bool { faceDetail && mode == "detail" }
+    var faceDetailActive: Bool { faceDetail && mode == "detail" && !protectFaces }
 
     var rateKey: String { "\(profile)-\(mode)\(turbo ? "-turbo" : "")" }  // speed memory for estimates
 
@@ -108,6 +113,202 @@ enum Fmt {
 
 // MARK: - Queue items
 
+/// 🖌 One mark of the Protect tools, in picture fractions (x, y from the top-left; radius as a fraction of the
+/// picture's width) so it fits any size the picture is shown or processed at.
+///   stroke: a brush line (radius) · fill: a closed shape (lasso, polygon, text boxes) · bitmap: a grey mask
+///   covering the whole picture (wand, subject), stored as PNG.
+struct ProtectStroke: Codable, Equatable {
+    var id = UUID()
+    var points: [CGPoint] = []
+    var radius: Double = 0
+    var erase: Bool = false
+    var kind: String = "stroke"
+    var mask: Data? = nil
+
+    init(points: [CGPoint], radius: Double, erase: Bool, kind: String = "stroke", mask: Data? = nil) {
+        self.points = points; self.radius = radius; self.erase = erase; self.kind = kind; self.mask = mask
+    }
+
+    init(from d: Decoder) throws {   // older paintings (brush lines only) still open
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        points = (try? c.decode([CGPoint].self, forKey: .points)) ?? []
+        radius = (try? c.decode(Double.self, forKey: .radius)) ?? 0
+        erase = (try? c.decode(Bool.self, forKey: .erase)) ?? false
+        kind = (try? c.decode(String.self, forKey: .kind)) ?? "stroke"
+        mask = try? c.decode(Data.self, forKey: .mask)
+    }
+}
+
+enum ProtectMask {
+    private static var maskCache: [UUID: CGImage] = [:]
+    private static var tintCache: [UUID: CGImage] = [:]
+
+    /// A bitmap mark's grey mask (decoded once).
+    static func maskImage(_ s: ProtectStroke) -> CGImage? {
+        if let m = maskCache[s.id] { return m }
+        guard let data = s.mask, let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        maskCache[s.id] = cg
+        return cg
+    }
+
+    /// The same mask as a solid red picture whose transparency follows the mask, for drawing on screen.
+    static func tinted(_ s: ProtectStroke) -> CGImage? {
+        if let t = tintCache[s.id] { return t }
+        guard let m = maskImage(s) else { return nil }
+        let w = m.width, h = m.height
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        let r = CGRect(x: 0, y: 0, width: w, height: h)
+        ctx.clip(to: r, mask: m)
+        ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        ctx.fill(r)
+        let t = ctx.makeImage()
+        tintCache[s.id] = t
+        return t
+    }
+
+    /// A grey PNG of `bytes` (width x height, one byte per pixel, 255 = protected).
+    static func png(_ bytes: [UInt8], width: Int, height: Int) -> Data? {
+        var b = bytes
+        guard let ctx = CGContext(data: &b, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue),
+              let cg = ctx.makeImage() else { return nil }
+        return png(cg)
+    }
+
+    static func png(_ cg: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, cg, nil)
+        return CGImageDestinationFinalize(dest) ? data as Data : nil
+    }
+
+    /// Everything painted, as a grey mask (white = keep out of the AI re-detailing), width x height pixels.
+    static func render(_ strokes: [ProtectStroke], width: Int, height: Int) -> CGImage? {
+        guard width > 0, height > 0, strokes.contains(where: { !$0.erase }),
+              let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
+        else { return nil }
+        ctx.setFillColor(gray: 0, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.setLineCap(.round); ctx.setLineJoin(.round)
+        let w = CGFloat(width), h = CGFloat(height)
+        let full = CGRect(x: 0, y: 0, width: w, height: h)
+        for s in strokes {
+            let v: CGFloat = s.erase ? 0 : 1
+            ctx.setStrokeColor(gray: v, alpha: 1); ctx.setFillColor(gray: v, alpha: 1)
+            let pts = s.points.map { CGPoint(x: $0.x * w, y: h - $0.y * h) }   // CG's origin is bottom-left
+            switch s.kind {
+            case "bitmap":
+                guard let m = maskImage(s) else { continue }
+                ctx.saveGState(); ctx.clip(to: full, mask: m); ctx.fill(full); ctx.restoreGState()
+            case "fill":
+                guard pts.count >= 3 else { continue }
+                ctx.beginPath(); ctx.addLines(between: pts); ctx.closePath(); ctx.fillPath()
+            default:
+                let r = CGFloat(s.radius) * w
+                if pts.count == 1, let p = pts.first {
+                    ctx.fillEllipse(in: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r))
+                } else if let first = pts.first {
+                    ctx.setLineWidth(2 * r)
+                    ctx.beginPath(); ctx.move(to: first)
+                    for p in pts.dropFirst() { ctx.addLine(to: p) }
+                    ctx.strokePath()
+                }
+            }
+        }
+        return ctx.makeImage()
+    }
+}
+
+/// 🪄 🙂 🔤 Selections that find an area by themselves (the Wand on the picture's colours, Subject and Text with
+/// Apple's built-in Vision: no downloads). Each returns marks, or a message when nothing was found.
+enum ProtectSelect {
+    /// Picture pixels (RGBA, top row first) at most `maxSide` on the long side.
+    static func pixels(_ image: NSImage, maxSide: Int = 1024) -> (bytes: [UInt8], w: Int, h: Int)? {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let s = min(1, Double(maxSide) / Double(max(cg.width, cg.height)))
+        let w = max(1, Int(Double(cg.width) * s)), h = max(1, Int(Double(cg.height) * s))
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &buf, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return (buf, w, h)   // CGContext memory is top row first
+    }
+
+    /// Magic wand: the connected area whose colour is within `tolerance` (0…255) of the clicked pixel.
+    static func wand(_ image: NSImage, at p: CGPoint, tolerance: Double, erase: Bool) -> ProtectStroke? {
+        guard let (px, w, h) = pixels(image) else { return nil }
+        let sx = min(w - 1, max(0, Int(p.x * Double(w)))), sy = min(h - 1, max(0, Int(p.y * Double(h))))
+        let o = (sy * w + sx) * 4
+        let r0 = Int(px[o]), g0 = Int(px[o + 1]), b0 = Int(px[o + 2])
+        let tol = Int(tolerance * tolerance * 3)
+        var out = [UInt8](repeating: 0, count: w * h)
+        var stack = [sy * w + sx]
+        out[sy * w + sx] = 255
+        while let i = stack.popLast() {
+            let x = i % w, y = i / w
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] where nx >= 0 && ny >= 0 && nx < w && ny < h {
+                let j = ny * w + nx
+                if out[j] != 0 { continue }
+                let q = j * 4
+                let dr = Int(px[q]) - r0, dg = Int(px[q + 1]) - g0, db = Int(px[q + 2]) - b0
+                if dr * dr + dg * dg + db * db <= tol { out[j] = 255; stack.append(j) }
+            }
+        }
+        guard let data = ProtectMask.png(out, width: w, height: h) else { return nil }
+        return ProtectStroke(points: [], radius: 0, erase: erase, kind: "bitmap", mask: data)
+    }
+
+    /// Select Subject: the people, animals or main things (Vision's foreground mask, macOS 14+).
+    static func subject(_ image: NSImage, erase: Bool) -> Result<ProtectStroke, Error> {
+        guard #available(macOS 14.0, *) else { return .failure(Msg("Select Subject needs macOS 14 or later.")) }
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return .failure(Msg("Couldn't read the picture.")) }
+        let handler = VNImageRequestHandler(cgImage: cg)
+        let req = VNGenerateForegroundInstanceMaskRequest()
+        do {
+            try handler.perform([req])
+            guard let obs = req.results?.first, !obs.allInstances.isEmpty else { return .failure(Msg("No subject found in this picture.")) }
+            let buf = try obs.generateScaledMaskForImage(forInstances: obs.allInstances, from: handler)
+            let ci = CIImage(cvPixelBuffer: buf)
+            guard let gray = DetailFilterEngine.context.createCGImage(ci, from: ci.extent, format: .L8,
+                                                                      colorSpace: CGColorSpaceCreateDeviceGray()),
+                  let data = ProtectMask.png(gray) else { return .failure(Msg("Couldn't make the selection.")) }
+            return .success(ProtectStroke(points: [], radius: 0, erase: erase, kind: "bitmap", mask: data))
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// Select Text: boxes around the writing (Vision text recognition), a little padding around each.
+    static func text(_ image: NSImage, erase: Bool) -> Result<[ProtectStroke], Error> {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return .failure(Msg("Couldn't read the picture.")) }
+        let req = VNRecognizeTextRequest()
+        req.recognitionLevel = .fast
+        do {
+            try VNImageRequestHandler(cgImage: cg).perform([req])
+            let boxes = (req.results ?? []).map(\.boundingBox)
+            guard !boxes.isEmpty else { return .failure(Msg("No writing found in this picture.")) }
+            return .success(boxes.map { b in
+                let pad = b.height * 0.25
+                let r = b.insetBy(dx: -pad, dy: -pad)
+                let top = 1 - r.maxY, bottom = 1 - r.minY     // Vision's origin is bottom-left
+                return ProtectStroke(points: [CGPoint(x: r.minX, y: top), CGPoint(x: r.maxX, y: top),
+                                              CGPoint(x: r.maxX, y: bottom), CGPoint(x: r.minX, y: bottom)],
+                                     radius: 0, erase: erase, kind: "fill")
+            })
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    struct Msg: LocalizedError { let text: String; init(_ t: String) { text = t }; var errorDescription: String? { text } }
+}
+
 struct QueueItem: Identifiable, Equatable {
     enum State: Equatable {
         case queued, running, done, stopped, cancelled
@@ -129,6 +330,8 @@ struct QueueItem: Identifiable, Equatable {
     var filtersBaked = false    // detail filters were applied before the AI ran (already in the output)
     var facesFixed: Int?        // Face Fix ran: how many faces it restored
     var job: JobSnapshot?       // + QUEUE: the settings this row was queued with (nil = use the current ones)
+    var protectStrokes: [ProtectStroke] = []   // 🖌 areas painted to keep out of the AI re-detailing
+    var protectPainted: Bool { protectStrokes.contains { !$0.erase } }
 
     var name: String { url.lastPathComponent }
     var isFinished: Bool {
@@ -1297,6 +1500,60 @@ final class AppModel: ObservableObject {
 
     // Queue
     @Published var items: [QueueItem] = []
+    // 🖌 Protect brush: paint areas of the selected photo to keep out of the AI re-detailing.
+    @Published var painting = false
+    @Published var brushSize = 0.04      // radius, fraction of the picture's width
+    @Published var brushErase = false    // Add (false) or Take away (true) for the shape tools
+    @Published var paintTool: PaintTool = .brush
+    @Published var wandTolerance = 30.0
+    @Published var paintBusy = false
+
+    func wandSelect(at p: CGPoint) {
+        guard let img = previewInput, !paintBusy else { return }
+        paintBusy = true
+        let tol = wandTolerance, erase = brushErase
+        DispatchQueue.global(qos: .userInitiated).async {
+            let st = ProtectSelect.wand(img, at: p, tolerance: tol, erase: erase)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.paintBusy = false
+                    if let st { self.selectedStrokes.append(st) }
+                }
+            }
+        }
+    }
+
+    func autoSelect(_ t: PaintTool) {
+        guard let img = previewInput, !paintBusy else { return }
+        paintBusy = true
+        let erase = brushErase
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r: Result<[ProtectStroke], Error> = t == .subject
+                ? ProtectSelect.subject(img, erase: erase).map { [$0] }
+                : ProtectSelect.text(img, erase: erase)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.paintBusy = false
+                    switch r {
+                    case .success(let marks): self.selectedStrokes += marks
+                    case .failure(let e): self.errorMessage = e.localizedDescription
+                    }
+                }
+            }
+        }
+    }
+
+    var selectedStrokes: [ProtectStroke] {
+        get { selected?.protectStrokes ?? [] }
+        set { if let i = items.firstIndex(where: { $0.id == selectedID }) { items[i].protectStrokes = newValue } }
+    }
+    func togglePainting() {
+        guard selected != nil else { errorMessage = "Open a photo first, then paint the areas to protect."; return }
+        painting.toggle()
+    }
+    func undoStroke() { if !selectedStrokes.isEmpty { selectedStrokes.removeLast() } }
+    func clearStrokes() { selectedStrokes = [] }
+
     @Published var selectedID: QueueItem.ID? = nil { didSet { if selectedID != oldValue { loadPreview() } } }
     @Published var running = false
     @Published private(set) var runTotal = 0
@@ -1749,14 +2006,20 @@ final class AppModel: ObservableObject {
         // handed to the engine as a fresh sRGB PNG, so the bundled Python image libraries never parse
         // untrusted files. ≤3072 px is plenty: the engine works at ≤768 px on the short side.
         let f = filters, src = item.url, itemID = item.id
+        let strokes = job.settings.mode == "detail" ? item.protectStrokes : []
         DispatchQueue.global(qos: .userInitiated).async {
             var input: String?
+            var maskPath: String?
             var faces: [[[Double]]] = []
             if let cg = ImageIOHelpers.cgImage(src, maxPixel: 3072),
                let clean = preFilter ? DetailFilterEngine.render(f, cg) : DetailFilterEngine.toSRGB(cg) {
-                if face != nil || detail != nil { faces = FaceFinder.landmarks(clean) }
+                if face != nil || detail != nil || job.settings.protectActive { faces = FaceFinder.landmarks(clean) }
                 let tmp = Self.tempDir.appendingPathComponent("input-\(UUID().uuidString.prefix(8)).png")
                 if (try? DetailFilterEngine.write(clean, to: tmp, type: .png)) != nil { input = tmp.path }
+                if let m = ProtectMask.render(strokes, width: clean.width, height: clean.height) {
+                    let mp = Self.tempDir.appendingPathComponent("protect-\(UUID().uuidString.prefix(8)).png")
+                    if (try? DetailFilterEngine.write(m, to: mp, type: .png)) != nil { maskPath = mp.path }
+                }
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -1768,6 +2031,10 @@ final class AppModel: ObservableObject {
                         self.finishItem()
                         return
                     }
+                    if job.settings.protectActive, !faces.isEmpty {
+                        params["protect_faces"] = ["faces": faces]
+                    }
+                    if let maskPath { params["protect_mask"] = maskPath }
                     if var detail, !faces.isEmpty {
                         detail["faces"] = faces
                         params["face_detail"] = detail
@@ -1776,7 +2043,7 @@ final class AppModel: ObservableObject {
                         face["faces"] = faces
                         params["face_fix"] = face
                     }
-                    if face != nil || detail != nil, let j = self.index(of: itemID) {
+                    if face != nil || detail != nil || job.settings.protectActive, let j = self.index(of: itemID) {
                         self.items[j].message = faces.isEmpty ? "No face found" : "Found \(faces.count) face\(faces.count == 1 ? "" : "s")"
                     }
                     self.engine.send(["id": id, "cmd": "enhance", "input": input, "output": out.path, "params": params])
@@ -1862,6 +2129,10 @@ final class AppModel: ObservableObject {
             items[i].seconds = secs
             items[i].message = "Done in \(Fmt.duration(secs))"
             items[i].facesFixed = nil
+            if (msg["areas_protected"] as? Bool) == true { items[i].message += " · painted areas protected" }
+            if let n = (msg["faces_protected"] as? NSNumber)?.intValue, n > 0 {
+                items[i].message += " · \(n) face\(n == 1 ? "" : "s") protected"
+            }
             if let n = (msg["faces_detailed"] as? NSNumber)?.intValue, n > 0 {
                 items[i].message += " · \(n) face\(n == 1 ? "" : "s") detailed"
             }
@@ -2146,6 +2417,7 @@ final class AppModel: ObservableObject {
         if let u = userPresets.first(where: { userPresetMatches($0) }) { return u.name }
         if let p = activePreset {
             return p + (settings.likeness > 0 ? " +likeness" : "") + (settings.faceDetailActive ? " +detail" : "")
+                + (settings.protectActive ? " +protect" : "")
                 + (faceFix ? " +face" : "") + (settings.keepTones ? "" : " -tones")
         }
         let s = settings
@@ -2153,6 +2425,7 @@ final class AppModel: ObservableObject {
         var parts = [String(format: "C%.2f R%.2f", s.creativity, s.resemblance)]
         if s.turbo { parts.append("turbo") }
         if s.likeness > 0 { parts.append(String(format: "L%.0f%%", s.likeness * 100)) }
+        if s.protectActive { parts.append("protect") }
         if s.faceDetailActive { parts.append(String(format: "FD%.0f%%", s.faceDetailStrength * 100)) }
         if faceFix { parts.append(faceModel == "codeformer" ? "CF" : "RF") }
         if !s.keepTones { parts.append("raw-tones") }
@@ -2175,6 +2448,7 @@ final class AppModel: ObservableObject {
         row.thumbnail = src.thumbnail
         row.inputSize = src.inputSize
         row.job = snapshot(label: settingsLabel)
+        row.protectStrokes = src.protectStrokes   // the same painted areas for each version
         items.append(row)
         if running { runTotal += 1 }
         if src.inputSize == .zero { loadMetadata(row.id, url: row.url) }
@@ -3288,7 +3562,7 @@ enum Guide: Equatable {
     case filterStage, bleach, dark, extract, viewMode, filtersKey, light, color, grain, bloom, facePreset
     case creativity, resemblance, hdr, steps, decay, solver, seed, prompt, negative
     case faceFix, faceModel, faceStrength, faceFidelity, zoom, likeness, myPresets, addQueue, autoSave
-    case keepTones, faceDetail, faceDetailStrength, faceDetailHair
+    case keepTones, faceDetail, faceDetailStrength, faceDetailHair, protectFaces, paintProtect
     case presence, mixer, grading, glow, blurFilter, skin
 
     var title: String {
@@ -3341,6 +3615,8 @@ enum Guide: Equatable {
         case .faceDetail: return "Face Detail"
         case .faceDetailStrength: return "Face Detail strength"
         case .faceDetailHair: return "Face Detail · Hair"
+        case .protectFaces: return "Protect Faces"
+        case .paintProtect: return "Paint Areas to Protect"
         case .presence: return "Presence"
         case .mixer: return "Color Mixer"
         case .grading: return "Color Grading"
@@ -3444,6 +3720,10 @@ enum Guide: Equatable {
             return "Like Protoart Studio's face detailer: after the enhance, each face is cut out with some room around it, redrawn close up at 512–768 px by the same AI, colour-matched and blended back with a soft edge. Small or distant faces get real eyes, lips and skin. Adds roughly 10–30 s per face. Runs before Face Fix, so you can use both. Not used by INSTANT. Turn it off with the switch."
         case .faceDetailStrength:
             return "How much the close-up may change each face. 15–20% (the default is 15%) sharpens and adds detail while keeping the person; 30% and up redraws more and can change the look. The face's own shapes always guide the redraw, and it's matched to its surroundings."
+        case .protectFaces:
+            return "Like Protoart Studio's Protect from Enhance, found automatically: faces are kept out of the AI re-detailing so they stay exactly the person. Face Fix (CodeFormer or RestoreFormer) runs first on a clean upscale of your photo, then the AI adds detail to everything else and the faces are blended back in softly. With Face Fix off, faces come from the clean upscale alone. Face Detail is off while this is on. Not needed for INSTANT."
+        case .paintProtect:
+            return "Like Protoart Studio's Protect from Enhance: click PAINT AREAS and mark anything the AI shouldn't re-detail (text, a logo, a pattern, hands, a face you want exactly as it is). Marked areas keep the photo as it is, cleanly upscaled; everything else gets the AI detail. Tools beside the picture: Brush (B), Erase (E), Lasso (L), Polygon (P), Wand (W), Subject (S) and Text (T), then Undo (⌘Z), Clear and Done (Esc). Each photo keeps its own marks, and + QUEUE copies them. Works with or without Protect Faces."
         case .faceDetailHair:
             return "Off: only the face (forehead to chin) is redrawn. On: the hair above and beside the face is redrawn too, for portraits where the hair looks soft."
         case .presence:
@@ -3809,6 +4089,41 @@ struct ControlsPanel: View {
                     }
                 }
 
+                Module(title: "Protect") {
+                    HStack(alignment: .center, spacing: 10) {
+                        ToggleSwitch(label: "Protect Faces", off: "Off", on: "On", isOn: $model.settings.protectFaces,
+                                     help: "Faces skip the AI re-detailing: Face Fix runs on them first, the rest gets the AI's new detail")
+                            .guide(.protectFaces)
+                        EngravedLabel(model.settings.mode == "instant" ? "Not needed for INSTANT (nothing is re-detailed)"
+                                      : (model.settings.protectFaces
+                                         ? (model.faceFix ? "On · Face Fix first, then the AI around the faces"
+                                                          : "On · faces kept from a clean upscale")
+                                         : "Off · the AI re-details faces too"), size: 10)
+                            .lineLimit(2).minimumScaleFactor(0.8)
+                        Spacer(minLength: 0)
+                    }
+                    HStack(spacing: 8) {
+                        Button(model.painting ? "DONE" : "PAINT AREAS") { model.togglePainting() }
+                            .buttonStyle(PresetKeyStyle(lit: model.painting)).fixedSize()
+                            .help("Paint parts of the photo to keep out of the AI re-detailing (any area, not just faces)")
+                            .guide(.paintProtect)
+                        Button("CLEAR") { model.clearStrokes() }
+                            .buttonStyle(MetalButtonStyle()).fixedSize()
+                            .disabled(model.selectedStrokes.isEmpty)
+                            .help("Remove the painted areas from this photo")
+                        Spacer(minLength: 0)
+                    }
+                    HStack {
+                        EngravedLabel(model.selected == nil ? "Open a photo to paint"
+                                      : model.selected?.protectPainted == true
+                                        ? (model.settings.mode == "instant" ? "Painted · not needed for INSTANT"
+                                                                             : "Painted areas protected on this photo")
+                                        : "Nothing painted on this photo", size: 10)
+                            .lineLimit(2).minimumScaleFactor(0.8)
+                        Spacer(minLength: 0)
+                    }
+                }
+
                 Module(title: "Face Detail") {
                     let instant = model.settings.mode == "instant"
                     HStack(alignment: .center, spacing: 6) {
@@ -3824,9 +4139,10 @@ struct ControlsPanel: View {
                             .guide(.faceDetailHair)
                     }
                     .frame(maxWidth: .infinity)
-                    .disabled(instant)
-                    .opacity(model.settings.faceDetail && !instant ? 1 : 0.75)
-                    EngravedLabel(instant ? "Not used by INSTANT · pick an AI preset"
+                    .disabled(instant || model.settings.protectFaces)
+                    .opacity(model.settings.faceDetail && !instant && !model.settings.protectFaces ? 1 : 0.75)
+                    EngravedLabel(model.settings.protectFaces ? "Off while Protect Faces is on"
+                                  : instant ? "Not used by INSTANT · pick an AI preset"
                                   : (model.settings.faceDetail ? "On · each face redrawn close up, then blended in"
                                                                : "Off · no download needed"), size: 10)
                 }
@@ -4684,6 +5000,266 @@ struct MeterBridge: View {
     }
 }
 
+/// 🖌 Protect tools (like Protoart Studio's paint bar): mark parts of the photo to keep out of the AI re-detailing.
+enum PaintTool: String, CaseIterable, Identifiable {
+    case brush, erase, lasso, poly, wand, subject, text
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .brush: return "Brush"; case .erase: return "Erase"; case .lasso: return "Lasso"
+        case .poly: return "Polygon"; case .wand: return "Wand"; case .subject: return "Subject"; case .text: return "Text"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .brush: return "paintbrush.pointed"; case .erase: return "eraser"; case .lasso: return "lasso"
+        case .poly: return "pentagon"; case .wand: return "wand.and.stars"; case .subject: return "person.crop.rectangle"
+        case .text: return "textformat"
+        }
+    }
+    var key: KeyEquivalent {
+        switch self {
+        case .brush: return "b"; case .erase: return "e"; case .lasso: return "l"; case .poly: return "p"
+        case .wand: return "w"; case .subject: return "s"; case .text: return "t"
+        }
+    }
+    var hint: String {
+        switch self {
+        case .brush: return "Paint over what to protect"
+        case .erase: return "Rub out protected paint"
+        case .lasso: return "Draw around an area; it fills when you let go"
+        case .poly: return "Click the corners; click the first point or double-click to close"
+        case .wand: return "Click a colour to pick the connected area"
+        case .subject: return "Finds the people, animals or main thing"
+        case .text: return "Finds the writing (signs, logos, captions)"
+        }
+    }
+    var tip: String { "\(label) (\(String(key.character).uppercased())): \(hint)" }
+}
+
+struct PaintCanvas: View {
+    @EnvironmentObject var model: AppModel
+    let image: NSImage
+    @State private var current: ProtectStroke?
+    @State private var poly: [CGPoint] = []
+    @State private var hover: CGPoint?
+
+    private func fit(_ size: CGSize) -> CGRect {
+        let iw = max(1, image.size.width), ih = max(1, image.size.height)
+        let s = min(size.width / iw, size.height / ih)
+        let w = iw * s, h = ih * s
+        return CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2, width: w, height: h)
+    }
+
+    private func norm(_ p: CGPoint, _ r: CGRect) -> CGPoint {
+        CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)
+    }
+
+    private func draw(_ st: ProtectStroke, in layer: inout GraphicsContext, _ r: CGRect) {
+        layer.blendMode = st.erase ? .clear : .normal
+        let pts = st.points.map { CGPoint(x: r.minX + $0.x * r.width, y: r.minY + $0.y * r.height) }
+        switch st.kind {
+        case "bitmap":
+            if let t = ProtectMask.tinted(st) { layer.draw(Image(decorative: t, scale: 1), in: r) }
+        case "fill":
+            var path = Path(); path.addLines(pts); path.closeSubpath()
+            layer.fill(path, with: .color(.red))
+        default:
+            let rad = CGFloat(st.radius) * r.width
+            if pts.count == 1, let p = pts.first {
+                layer.fill(Path(ellipseIn: CGRect(x: p.x - rad, y: p.y - rad, width: 2 * rad, height: 2 * rad)), with: .color(.red))
+            } else {
+                var path = Path(); path.addLines(pts)
+                layer.stroke(path, with: .color(.red), style: StrokeStyle(lineWidth: 2 * rad, lineCap: .round, lineJoin: .round))
+            }
+        }
+    }
+
+    private func closePoly() {
+        if poly.count >= 3 { model.selectedStrokes.append(ProtectStroke(points: poly, radius: 0, erase: model.brushErase, kind: "fill")) }
+        poly = []
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let r = fit(geo.size)
+            let tool = model.paintTool
+            ZStack(alignment: .topLeading) {
+                Image(nsImage: image).resizable().interpolation(.high)
+                    .frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
+                Canvas { ctx, _ in
+                    ctx.drawLayer { layer in
+                        for st in model.selectedStrokes { draw(st, in: &layer, r) }
+                        if let c = current { draw(c, in: &layer, r) }
+                    }
+                }
+                .opacity(0.45)
+                .allowsHitTesting(false)
+                // polygon in progress / lasso outline
+                Canvas { ctx, _ in
+                    let pts = (tool == .poly ? poly : (current?.kind == "fill" ? current?.points ?? [] : []))
+                        .map { CGPoint(x: r.minX + $0.x * r.width, y: r.minY + $0.y * r.height) }
+                    guard pts.count > 1 || (tool == .poly && !pts.isEmpty) else { return }
+                    var path = Path(); path.addLines(pts)
+                    if tool == .poly, let h = hover { path.addLine(to: h) }
+                    ctx.stroke(path, with: .color(.white), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                    if tool == .poly, let f = pts.first {
+                        ctx.stroke(Path(ellipseIn: CGRect(x: f.x - 5, y: f.y - 5, width: 10, height: 10)), with: .color(.yellow), lineWidth: 1.5)
+                    }
+                }
+                .allowsHitTesting(false)
+                if let h = hover, tool == .brush || tool == .erase {
+                    let d = CGFloat(model.brushSize) * r.width * 2
+                    Circle().stroke(Color.black.opacity(0.6), lineWidth: 3)
+                        .overlay(Circle().stroke(tool == .erase ? Color.cyan : Color.white, lineWidth: 1.5))
+                        .frame(width: d, height: d).position(h).allowsHitTesting(false)
+                }
+                if model.paintBusy {
+                    Text("FINDING…").font(Console.mono(12)).foregroundStyle(Console.amber)
+                        .padding(8).background(Color.black.opacity(0.7)).position(x: r.midX, y: r.midY)
+                }
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { v in
+                    hover = v.location
+                    let p = norm(v.location, r)
+                    guard p.x > -0.1, p.x < 1.1, p.y > -0.1, p.y < 1.1 else { return }
+                    switch tool {
+                    case .brush, .erase:
+                        if current == nil {
+                            current = ProtectStroke(points: [p], radius: model.brushSize, erase: tool == .erase)
+                        } else if let last = current?.points.last,
+                                  hypot((p.x - last.x) * r.width, (p.y - last.y) * r.height) > 1.5 {
+                            current?.points.append(p)   // skip sub-pixel moves: fewer points, smooth drawing
+                        }
+                    case .lasso:
+                        if current == nil {
+                            current = ProtectStroke(points: [p], radius: 0, erase: model.brushErase, kind: "fill")
+                        } else if let last = current?.points.last,
+                                  hypot((p.x - last.x) * r.width, (p.y - last.y) * r.height) > 2 {
+                            current?.points.append(p)
+                        }
+                    default: break
+                    }
+                }
+                .onEnded { v in
+                    let p = norm(v.location, r)
+                    switch tool {
+                    case .brush, .erase:
+                        if let c = current { model.selectedStrokes.append(c) }
+                    case .lasso:
+                        if let c = current, c.points.count >= 3 { model.selectedStrokes.append(c) }
+                    case .poly:
+                        if let f = poly.first, poly.count >= 3,
+                           hypot((p.x - f.x) * r.width, (p.y - f.y) * r.height) < 9 { closePoly() }
+                        else { poly.append(p) }
+                    case .wand:
+                        model.wandSelect(at: p)
+                    case .subject, .text:
+                        break   // they run from the options bar's FIND button
+                    }
+                    current = nil
+                })
+            .simultaneousGesture(TapGesture(count: 2).onEnded { if tool == .poly { closePoly() } })
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let p): hover = p
+                case .ended: hover = nil
+                }
+            }
+            .onChange(of: model.paintTool) { _ in poly = []; current = nil }
+            .onExitCommand { if !poly.isEmpty { poly = [] } else { model.painting = false } }
+        }
+    }
+}
+
+/// The tools beside the picture: each an icon with a one-line label (never cut off), then Undo, Clear and Done.
+struct PaintToolColumn: View {
+    @EnvironmentObject var model: AppModel
+    private func cell(_ symbol: String, _ label: String, lit: Bool = false) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: symbol).font(.system(size: 13, weight: .medium))
+            Text(label).font(.system(size: 8.5, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .frame(width: 46, height: 34)
+        .foregroundStyle(lit ? Color.black : Color(white: 0.85))
+        .background(RoundedRectangle(cornerRadius: 5).fill(lit ? Console.amber : Color(white: 0.16)))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.black.opacity(0.6), lineWidth: 1))
+        .contentShape(Rectangle())
+    }
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVGrid(columns: [GridItem(.fixed(46), spacing: 4), GridItem(.fixed(46), spacing: 4)], spacing: 4) {
+                ForEach(PaintTool.allCases) { t in
+                    Button { model.paintTool = t } label: { cell(t.symbol, t.label, lit: model.paintTool == t) }
+                        .buttonStyle(.plain).help(t.tip)
+                        .keyboardShortcut(t.key, modifiers: [])
+                }
+                Button { model.undoStroke() } label: { cell("arrow.uturn.backward", "Undo") }
+                    .buttonStyle(.plain).help("Undo the last mark (⌘Z)").keyboardShortcut("z", modifiers: .command)
+                    .disabled(model.selectedStrokes.isEmpty)
+                Button { model.clearStrokes() } label: { cell("trash", "Clear") }
+                    .buttonStyle(.plain).help("Remove everything marked on this photo")
+                    .disabled(model.selectedStrokes.isEmpty)
+                Button { model.painting = false } label: { cell("checkmark", "Done", lit: true) }
+                    .buttonStyle(.plain).keyboardShortcut(.escape, modifiers: []).help("Stop painting (Esc). The marked areas stay protected for this photo.")
+            }
+            .padding(.vertical, 2)
+        }
+        .frame(width: 98)
+    }
+}
+
+/// The slim bar above the picture: only the current tool's settings, laid out so nothing is cut off.
+struct PaintOptionsBar: View {
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        let t = model.paintTool
+        HStack(spacing: 10) {
+            Text(t.label.uppercased()).font(Console.mono(11)).foregroundStyle(Console.amber).fixedSize()
+            if t == .brush || t == .erase {
+                Text("SIZE").font(Console.mono(10)).foregroundStyle(Color(white: 0.7)).fixedSize()
+                Slider(value: $model.brushSize, in: 0.005...0.15).frame(minWidth: 70, maxWidth: 140)
+                    .help("Brush size (the ring on the picture shows it)")
+            }
+            if t == .wand {
+                Text("TOLERANCE \(Int(model.wandTolerance))").font(Console.mono(10)).foregroundStyle(Color(white: 0.7)).fixedSize()
+                Slider(value: $model.wandTolerance, in: 2...120).frame(minWidth: 70, maxWidth: 140)
+                    .help("How different a colour may be and still be picked")
+            }
+            if t != .brush && t != .erase {
+                HStack(spacing: 2) {
+                    ForEach([("＋ ADD", false), ("－ TAKE AWAY", true)], id: \.0) { item in
+                        Button { model.brushErase = item.1 } label: {
+                            Text(item.0).font(Console.mono(10)).lineLimit(1).fixedSize()
+                                .padding(.horizontal, 8).frame(height: 22)
+                                .foregroundStyle(model.brushErase == item.1 ? Color.black : Color(white: 0.85))
+                                .background(RoundedRectangle(cornerRadius: 4)
+                                    .fill(model.brushErase == item.1 ? Console.amber : Color(white: 0.18)))
+                        }
+                        .buttonStyle(.plain)
+                        .help(item.1 ? "Take away from the protected area" : "Add to the protected area")
+                    }
+                }
+                .fixedSize()
+            }
+            if t == .subject || t == .text {
+                Button(t == .subject ? "FIND SUBJECT" : "FIND TEXT") { model.autoSelect(t) }
+                    .buttonStyle(MetalButtonStyle()).fixedSize()
+                    .disabled(model.paintBusy)
+            }
+            Text(t.hint).font(.system(size: 11)).foregroundStyle(Color(white: 0.75))
+                .lineLimit(1).truncationMode(.tail).layoutPriority(-1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10).frame(height: 32)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.55)))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Console.amber.opacity(0.45), lineWidth: 1))
+        .help(t.tip)
+    }
+}
+
 struct ImageScreen: View {
     @EnvironmentObject var model: AppModel
 
@@ -4691,7 +5267,16 @@ struct ImageScreen: View {
         ZStack {
             LinearGradient(colors: [Color(red: 0.05, green: 0.06, blue: 0.07), Color(red: 0.02, green: 0.02, blue: 0.025)],
                            startPoint: .top, endPoint: .bottom)
-            if let before = model.previewInput, let after = model.displayAfter {
+            if model.painting, let img = model.previewInput {
+                VStack(spacing: 8) {
+                    PaintOptionsBar()
+                    HStack(spacing: 8) {
+                        PaintToolColumn()
+                        PaintCanvas(image: img)
+                    }
+                }
+                .padding(10)
+            } else if let before = model.previewInput, let after = model.displayAfter {
                 CompareView(before: before, after: after, mode: model.viewMode, split: $model.splitPosition,
                             zoom: $model.zoomScale, pan: $model.zoomPan).padding(14)
             } else if let img = model.previewInput {
@@ -5075,6 +5660,15 @@ enum HelpContent {
         ("My presets", [
             "Set the knobs the way you like, then press **+ SAVE** under **My presets** and give it a name. Tick **Include Adjust & filters** to keep your Light, Color and filter settings too.",
             "Click a preset to use it (its key lights up while the knobs match). Right-click it to **update** it with the current settings, **rename** it or **delete** it.",
+        ]),
+        ("Protect Faces", [
+            "Turn **Protect Faces** on to keep faces out of the AI re-detailing (like Protoart Studio's Protect from Enhance, but the faces are found for you). **Face Fix** runs first on a clean upscale of your photo; then the AI adds detail to everything else, and the faces are blended back in softly, so they stay exactly the person.",
+            "Use it when the AI changes how someone looks. With Face Fix off, faces simply come from the clean upscale. Face Detail is switched off while Protect Faces is on. Turn it off with its switch.",
+        ]),
+        ("Paint Areas to Protect", [
+            "Click **🖌 PAINT AREAS** in the Protect module to keep any part of the photo out of the AI re-detailing, like Protoart Studio's Protect from Enhance brush. Paint over it (it shows red); painted areas keep the photo as it is, cleanly upscaled, and everything else gets the AI's new detail.",
+            "The tools beside the picture work like Protoart Studio's paint bar: **Brush** (B) and **Erase** (E) with a size slider; **Lasso** (L): draw around an area and it fills; **Polygon** (P): click the corners, then click the first point or double-click to close; **Wand** (W): click a colour to pick the connected area (Tolerance sets how similar); **Subject** (S) and **Text** (T): FIND SUBJECT / FIND TEXT find the people and main things, or the writing, by themselves with Apple's built-in Vision (no downloads). For the shape tools, **ADD / TAKE AWAY** adds to or removes from the protected area.",
+            "**Undo** (⌘Z) removes the last mark, **Clear** removes everything, **Done** (Esc) stops painting. Each photo keeps its own marks; **+ QUEUE** copies them to every version. It works on its own or together with **Protect Faces**, and Face Detail leaves marked faces alone.",
         ]),
         ("Face Detail", [
             "Turn **Face Detail** on to redraw every face close up after the enhance (like Protoart Studio's face detailer, or ADetailer): each face is cut out with some room around it, redrawn at 512–768 px by the same AI, matched to the light and colour around it, and blended back through a soft oval. Small or distant faces get real eyes, lips and skin instead of mush.",
