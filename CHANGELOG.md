@@ -1,10 +1,13 @@
 # Changelog
 
+## 1.3.2 — 2026-11-09
+- **Protect** (like Protoart Studio's Protect from Enhance): **Protect Faces** runs Face Fix first on a clean upscale and keeps faces out of the AI re-detailing; **PAINT AREAS** marks anything else to keep as it is, with Studio-style tools: Brush, Erase, Lasso, Polygon, Wand, and Subject / Text found by Apple's built-in Vision (no downloads), Add / Take away, Undo, Clear.
+- Text selection: "nothing found" is a quiet note in the paint bar (not an error); it reads small writing too.
+
 ## 1.3.1 — 2026-11-09
 - **Before on the left, After on the right** in the Split view.
 - **Keep Tones** (on by default): the result keeps your photo's own brightness and colour; only the new detail is added (ported from Protoart Studio's "Keep the picture's style"). Results are also tagged sRGB, so Before and After show the same colours.
 - **Face Detail** (off by default, 15% strength): each face is redrawn close up by the same AI, guided by its own shapes, colour-matched and blended back (ported from Protoart Studio's face detailer). Optional Hair.
-- **Protect** (like Protoart Studio's Protect from Enhance): **Protect Faces** runs Face Fix first on a clean upscale and keeps faces out of the AI re-detailing; **PAINT AREAS** marks anything else to keep as it is, with Studio-style tools: Brush, Erase, Lasso, Polygon, Wand, and Subject / Text found by Apple's built-in Vision (no downloads), Add / Take away, Undo, Clear.
 - **Face Fix**: restored faces keep the photo's skin tone; CodeFormer is the default model for new users.
 - **Adjust**: Presence (Texture, Clarity, Dehaze, Sharpen, Vignette), Color Mixer, Color Grading, and the Glamour Glow, Blur and Skin Texture filters, ported from Protoart Studio's Adjust. Each has an on/off, a reset and its own guide.
 - Checks: gitleaks (no leaks), OSV dependency audit (clean apart from the Intel-only PyTorch 2.2.2 notes in SECURITY.md), filter self-test (all kernels compile; full preview with every filter on in 0.14 s).
