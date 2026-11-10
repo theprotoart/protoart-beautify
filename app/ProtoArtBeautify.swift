@@ -272,7 +272,7 @@ enum ProtectSelect {
         let req = VNGenerateForegroundInstanceMaskRequest()
         do {
             try handler.perform([req])
-            guard let obs = req.results?.first, !obs.allInstances.isEmpty else { return .failure(Msg("No subject found in this picture.")) }
+            guard let obs = req.results?.first, !obs.allInstances.isEmpty else { return .failure(Msg("No subject found in this picture")) }
             let buf = try obs.generateScaledMaskForImage(forInstances: obs.allInstances, from: handler)
             let ci = CIImage(cvPixelBuffer: buf)
             guard let gray = DetailFilterEngine.context.createCGImage(ci, from: ci.extent, format: .L8,
@@ -288,11 +288,12 @@ enum ProtectSelect {
     static func text(_ image: NSImage, erase: Bool) -> Result<[ProtectStroke], Error> {
         guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return .failure(Msg("Couldn't read the picture.")) }
         let req = VNRecognizeTextRequest()
-        req.recognitionLevel = .fast
+        req.recognitionLevel = .accurate       // finds small writing too (still about a second)
+        req.usesLanguageCorrection = false
         do {
             try VNImageRequestHandler(cgImage: cg).perform([req])
             let boxes = (req.results ?? []).map(\.boundingBox)
-            guard !boxes.isEmpty else { return .failure(Msg("No writing found in this picture.")) }
+            guard !boxes.isEmpty else { return .failure(Msg("No writing found (it may be too small to read)")) }
             return .success(boxes.map { b in
                 let pad = b.height * 0.25
                 let r = b.insetBy(dx: -pad, dy: -pad)
@@ -1507,6 +1508,7 @@ final class AppModel: ObservableObject {
     @Published var paintTool: PaintTool = .brush
     @Published var wandTolerance = 30.0
     @Published var paintBusy = false
+    @Published var paintNote: String?    // "No writing found…": a quiet note in the paint bar, not an error
 
     func wandSelect(at p: CGPoint) {
         guard let img = previewInput, !paintBusy else { return }
@@ -1536,7 +1538,9 @@ final class AppModel: ObservableObject {
                     self.paintBusy = false
                     switch r {
                     case .success(let marks): self.selectedStrokes += marks
-                    case .failure(let e): self.errorMessage = e.localizedDescription
+                    case .failure(let e):
+                        self.paintNote = e.localizedDescription
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { MainActor.assumeIsolated { self.paintNote = nil } }
                     }
                 }
             }
@@ -5249,8 +5253,10 @@ struct PaintOptionsBar: View {
                     .buttonStyle(MetalButtonStyle()).fixedSize()
                     .disabled(model.paintBusy)
             }
-            Text(t.hint).font(.system(size: 11)).foregroundStyle(Color(white: 0.75))
+            Text(model.paintNote ?? t.hint).font(.system(size: 11))
+                .foregroundStyle(model.paintNote == nil ? Color(white: 0.75) : Console.amber)
                 .lineLimit(1).truncationMode(.tail).layoutPriority(-1)
+                .help(model.paintNote ?? t.hint)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10).frame(height: 32)
