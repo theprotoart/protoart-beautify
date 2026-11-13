@@ -1,4 +1,4 @@
-torch>=2.6          # 2.6+: torch.load is weights_only by default (CVE-2025-32434)
+torch>=2.13.0          # 2.6+: torch.load is weights_only by default (CVE-2025-32434)
 refiners @ git+https://github.com/finegrain-ai/refiners@cfe8b66ba4f8a906583850ac25e9e89cb83a44b9
 spandrel>=0.4
 safetensors>=0.4.5

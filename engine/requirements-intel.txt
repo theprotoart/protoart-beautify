@@ -1,7 +1,7 @@
 # Intel Macs (x86_64). PyTorch stopped publishing Intel-Mac builds after 2.2.2, so this is the newest
 # possible. Its torch.load weakness (CVE-2025-32434) doesn't apply here: the only pickle files the app
 # loads are checked against pinned SHA-256 hashes first (engine/models.py), everything else is safetensors.
-torch==2.2.2
+torch==2.13.0
 torchvision==0.17.2
 refiners @ git+https://github.com/finegrain-ai/refiners@cfe8b66ba4f8a906583850ac25e9e89cb83a44b9
 spandrel>=0.4
