@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.3 — 2026-11-14
+Security update (see the audit in SECURITY.md). No changes to how the app looks or works.
+- **Every model file is now fingerprint-checked** (SHA-256) before it's used, including the four large ones. A file that doesn't match is deleted and never used. The first-time setup spends about 10 extra seconds on this.
+- Models download from their current Hugging Face names (four were renamed), with no reliance on redirects.
+- Builds use exact, reviewed package versions and an exact Python release (3.12.15), so a build can't pick up untested packages.
+- New security tests: `python3 -m unittest discover -s engine/tests -v`.
+
 ## 1.3.2 — 2026-11-09
 - **Protect** (like Protoart Studio's Protect from Enhance): **Protect Faces** runs Face Fix first on a clean upscale and keeps faces out of the AI re-detailing; **PAINT AREAS** marks anything else to keep as it is, with Studio-style tools: Brush, Erase, Lasso, Polygon, Wand, and Subject / Text found by Apple's built-in Vision (no downloads), Add / Take away, Undo, Clear.
 - Text selection: "nothing found" is a quiet note in the paint bar (not an error); it reads small writing too.
