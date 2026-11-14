@@ -36,13 +36,13 @@ class Remote:
 
 
 REMOTES: list[Remote] = [
-    Remote("unet", "refiners/juggernaut.reborn.sd1_5.unet", "model.safetensors",
+    Remote("unet", "refiners/sd15.juggernaut.reborn.unet", "model.safetensors",
            "347d14c3c782c4959cc4d1bb1e336d19f7dda4d2", True, 3440),
-    Remote("clip_text_encoder", "refiners/juggernaut.reborn.sd1_5.text_encoder", "model.safetensors",
+    Remote("clip_text_encoder", "refiners/sd15.juggernaut.reborn.text_encoder", "model.safetensors",
            "744ad6a5c0437ec02ad826df9f6ede102bb27481", True, 490),
-    Remote("lda", "refiners/juggernaut.reborn.sd1_5.autoencoder", "model.safetensors",
+    Remote("lda", "refiners/sd15.juggernaut.reborn.autoencoder", "model.safetensors",
            "3c1aae3fc3e03e4a2b7e0fa42b62ebb64f1a4c19", True, 330),
-    Remote("controlnet_tile", "refiners/controlnet.sd1_5.tile", "model.safetensors",
+    Remote("controlnet_tile", "refiners/sd15.controlnet.tile", "model.safetensors",
            "48ced6ff8bfa873a8976fa467c3629a240643387", True, 1450),
     Remote("esrgan", "philz1337x/upscaler", "4x-UltraSharp.pth",
            "011deacac8270114eb7d2eeff4fe6fa9a837be70", False, 67),
@@ -71,9 +71,15 @@ REMOTES: list[Remote] = [
 ]
 
 
-# SHA-256 of files used exactly as downloaded (match Hugging Face's LFS hashes). The two pickle-format
-# files (.pth/.pt) are always checked before loading: a tampered pickle can run code on older PyTorch.
+# SHA-256 of every model file (they match Hugging Face's own LFS hashes at the pinned commits). Each file is
+# checked before it is used: the big safetensors once, before their one-time fp16 conversion (only the fp16 copy
+# is kept), and the pickle-format files (.pth/.pt) before every load, because a tampered pickle can run code on
+# older PyTorch. A file that doesn't match is deleted and never used.
 PINNED_SHA256 = {
+    "unet": "64a75d16fdb11faeedbef8270fcdfe3051284f743cdf46d8bb89c09499a22591",
+    "clip_text_encoder": "c649e079cbef5ccd79ef643acac29363d153d5a5f719e9c2e1893c96ec8b2357",
+    "lda": "6f1ed875201344031f2a9ddee3ff40f455eb2a5ee4833070061a5d163cb23595",
+    "controlnet_tile": "3002029df75364fcbdbf6024dc4c414c929cb8623a2fe7d406a4dbfcee1ffa5a",
     "esrgan": "a5812231fc936b42af08a5edba784195495d303d5b3248c24489ef0c4021fe01",
     "negative_embedding": "979ea73200c7c29ba884e642e544c54abfaad4c9a82582c68f3212d390d41397",
     "lora_more_details": "d9cf2f88dec53a8dd8c09aba2b1d67963b265ebdf8255660f5bcd7f1c8edba33",
@@ -150,6 +156,8 @@ def ensure_models(status: Callable[[str, float | None], None]) -> dict[str, Path
             status(f"Downloading {r.key} (~{r.approx_mb} MB) — {i + 1}/{total}", i / total)
             local = Path(hf_hub_download(repo_id=r.repo_id, filename=r.filename, revision=r.revision))
         if r.convert_fp16:
+            status(f"Checking {r.key} (one time) — {i + 1}/{total}", i / total)
+            _verify(r.key, local)  # before conversion: a file that fails is deleted, never converted or used
             status(f"Converting {r.key} to fp16 (one time) — {i + 1}/{total}", i / total)
             _to_fp16(local, final)
             # Drop the big fp32 original: we only ever load the fp16 copy.

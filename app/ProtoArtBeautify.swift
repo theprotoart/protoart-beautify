@@ -1195,13 +1195,13 @@ struct ModelFile {
 enum ModelStore {
     /// Same checkpoints and pinned revisions as the finegrain-image-enhancer Space.
     static let files: [ModelFile] = [
-        ModelFile(key: "unet", repo: "refiners/juggernaut.reborn.sd1_5.unet", file: "model.safetensors",
+        ModelFile(key: "unet", repo: "refiners/sd15.juggernaut.reborn.unet", file: "model.safetensors",
                   rev: "347d14c3c782c4959cc4d1bb1e336d19f7dda4d2", fp16: true, mb: 3440),
-        ModelFile(key: "clip_text_encoder", repo: "refiners/juggernaut.reborn.sd1_5.text_encoder", file: "model.safetensors",
+        ModelFile(key: "clip_text_encoder", repo: "refiners/sd15.juggernaut.reborn.text_encoder", file: "model.safetensors",
                   rev: "744ad6a5c0437ec02ad826df9f6ede102bb27481", fp16: true, mb: 490),
-        ModelFile(key: "lda", repo: "refiners/juggernaut.reborn.sd1_5.autoencoder", file: "model.safetensors",
+        ModelFile(key: "lda", repo: "refiners/sd15.juggernaut.reborn.autoencoder", file: "model.safetensors",
                   rev: "3c1aae3fc3e03e4a2b7e0fa42b62ebb64f1a4c19", fp16: true, mb: 330),
-        ModelFile(key: "controlnet_tile", repo: "refiners/controlnet.sd1_5.tile", file: "model.safetensors",
+        ModelFile(key: "controlnet_tile", repo: "refiners/sd15.controlnet.tile", file: "model.safetensors",
                   rev: "48ced6ff8bfa873a8976fa467c3629a240643387", fp16: true, mb: 1450),
         ModelFile(key: "esrgan", repo: "philz1337x/upscaler", file: "4x-UltraSharp.pth",
                   rev: "011deacac8270114eb7d2eeff4fe6fa9a837be70", fp16: false, mb: 67),
@@ -1229,8 +1229,9 @@ enum ModelStore {
     ]
 
     /// SHA-256 of every file that is kept exactly as downloaded (checked against Hugging Face's own LFS
-    /// hashes). A download that doesn't match is thrown away. The big safetensors files are verified by
-    /// HTTPS + pinned commit and converted to fp16 locally.
+    /// hashes). A download that doesn't match is thrown away. The big safetensors files (1.7 GB and less) are
+    /// checked by the engine instead, in the background before their one-time fp16 conversion (engine/models.py
+    /// PINNED_SHA256), so hashing them never pauses the window here.
     static let pinnedSHA256: [String: String] = [
         "esrgan": "a5812231fc936b42af08a5edba784195495d303d5b3248c24489ef0c4021fe01",
         "negative_embedding": "979ea73200c7c29ba884e642e544c54abfaad4c9a82582c68f3212d390d41397",

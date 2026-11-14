@@ -22,13 +22,14 @@ APP_NAME="ProtoArt Beautify"
 BUNDLE_ID="com.protoart.beautify"
 VERSION="1.3.2"
 PY_VERSION="3.12"
+PY_PATCH="3.12.15"   # exact Python release bundled in the app (update deliberately, then re-test)
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD="$ROOT/.build"
 if [[ "$ARCH" == "x86_64" ]]; then
-  DIST="$ROOT/dist-intel"; PY_ARCH="x86_64"; REQ="$ROOT/engine/requirements-intel.txt"; PKGS="$BUILD/site-packages-x86_64"
+  DIST="$ROOT/dist-intel"; PY_ARCH="x86_64"; REQ="$ROOT/engine/requirements-intel.txt"; CON="$ROOT/engine/constraints-intel.txt"; PKGS="$BUILD/site-packages-x86_64"
 else
-  DIST="$ROOT/dist"; PY_ARCH="aarch64"; REQ="$ROOT/engine/requirements.txt"; PKGS="$BUILD/site-packages"
+  DIST="$ROOT/dist"; PY_ARCH="aarch64"; REQ="$ROOT/engine/requirements.txt"; CON="$ROOT/engine/constraints.txt"; PKGS="$BUILD/site-packages"
 fi
 APP="$DIST/$APP_NAME.app"
 RES="$APP/Contents/Resources"
@@ -57,21 +58,21 @@ if [[ ! -x "$UV" ]]; then
 fi
 
 # ── 2. Standalone, relocatable Python ─────────────────────────────────────────
-say "Fetching standalone Python $PY_VERSION"
+say "Fetching standalone Python $PY_PATCH"
 # --no-bin: don't add python3.x shortcuts to ~/.local/bin (keeps everything inside this folder)
-"$UV" python install "$PY_VERSION" --no-bin --install-dir "$BUILD/python"   # the build machine's own (arm64)
+"$UV" python install "$PY_PATCH" --no-bin --install-dir "$BUILD/python"   # the build machine's own (arm64)
 # remove shortcuts an earlier build left in ~/.local/bin (only ones pointing into this .build folder)
 for l in "$HOME/.local/bin"/python3*; do
   [[ -L "$l" && "$(readlink "$l")" == "$BUILD/"* ]] && rm -f "$l"
 done
-HOST_PY_DIR="$(find "$BUILD/python" -maxdepth 1 -type d -name "cpython-$PY_VERSION*-macos-aarch64-none" | sort | tail -n1)"
+HOST_PY_DIR="$(find "$BUILD/python" -maxdepth 1 -type d -name "cpython-$PY_PATCH-macos-aarch64-none" | sort | tail -n1)"
 [[ -n "$HOST_PY_DIR" && -x "$HOST_PY_DIR/bin/python3" ]] || die "Couldn't locate the downloaded Python."
 HOST_PY="$HOST_PY_DIR/bin/python3"
 if [[ "$ARCH" == "x86_64" ]]; then
-  say "Fetching standalone Python $PY_VERSION for Intel Macs"
-  "$UV" python install "cpython-$PY_VERSION-macos-x86_64-none" --no-bin --install-dir "$BUILD/python"
+  say "Fetching standalone Python $PY_PATCH for Intel Macs"
+  "$UV" python install "cpython-$PY_PATCH-macos-x86_64-none" --no-bin --install-dir "$BUILD/python"
 fi
-PY_DIR="$(find "$BUILD/python" -maxdepth 1 -type d -name "cpython-$PY_VERSION*-macos-$PY_ARCH-none" | sort | tail -n1)"
+PY_DIR="$(find "$BUILD/python" -maxdepth 1 -type d -name "cpython-$PY_PATCH-macos-$PY_ARCH-none" | sort | tail -n1)"
 [[ -n "$PY_DIR" && -x "$PY_DIR/bin/python3" ]] || die "Couldn't locate the downloaded $PY_ARCH Python."
 
 # ── 3. App skeleton ───────────────────────────────────────────────────────────
@@ -85,17 +86,18 @@ rm -rf "$RES/runtime/include" "$RES/runtime/share" \
 rm -f "$RES/runtime/lib/python$PY_VERSION/EXTERNALLY-MANAGED"
 
 # ── 4. Engine dependencies (PyTorch w/ MPS, refiners, spandrel, …) ───────────
-# Installed once into .build/site-packages(-x86_64) and reused until the requirements file changes.
+# Installed once into .build/site-packages(-x86_64) and reused until the requirements or pinned versions change.
+# Every package is held to the exact version in engine/constraints*.txt (reviewed and checked for known issues).
 STAMP="$PKGS/.requirements.sha"
-REQ_SHA="$(shasum "$REQ" | cut -d' ' -f1)-$PY_VERSION-$ARCH"
+REQ_SHA="$(cat "$REQ" "$CON" | shasum | cut -d' ' -f1)-$PY_PATCH-$ARCH"
 if [[ ! -f "$STAMP" || "$(cat "$STAMP")" != "$REQ_SHA" ]]; then
   say "Installing engine packages (PyTorch is ~350 MB, this takes a few minutes)"
   rm -rf "$PKGS"
   if [[ "$ARCH" == "x86_64" ]]; then
     # resolve and fetch Intel-Mac wheels from this (arm64) Mac
-    "$UV" pip install --python "$HOST_PY" --python-platform x86_64-apple-darwin --target "$PKGS" -r "$REQ"
+    "$UV" pip install --python "$HOST_PY" --python-platform x86_64-apple-darwin --target "$PKGS" -r "$REQ" -c "$CON"
   else
-    "$UV" pip install --python "$PY_DIR/bin/python3" --target "$PKGS" -r "$REQ"
+    "$UV" pip install --python "$PY_DIR/bin/python3" --target "$PKGS" -r "$REQ" -c "$CON"
   fi
   # Trim things only needed for compiling extensions.
   rm -rf "$PKGS/torch/include" "$PKGS/torch/share" "$PKGS/torch/test" "$PKGS/bin"
