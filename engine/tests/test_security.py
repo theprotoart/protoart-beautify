@@ -164,6 +164,13 @@ class BuildPinning(unittest.TestCase):
             for must in ("torch", "pillow", "numpy", "safetensors", "spandrel", "huggingface-hub", "filelock"):
                 self.assertIn(must, pinned, f"{con_file} must pin {must}")
 
+    def test_build_removes_personal_paths(self):
+        src = BUILD.read_text()
+        # any folder Python was ever installed in (it moves with the project), and the build stops if one is left
+        self.assertIn('PY_ANY="[^\\"\' ]*/\\.build/python/cpython-$PY_PATCH-macos-$PY_ARCH-none"', src)
+        self.assertIn('-e "s#$PY_ANY#$BUNDLE_RT#g"', src)
+        self.assertRegex(src, r'STOPPED: the bundle still mentions your home folder.*exit 1')
+
     def test_build_uses_the_pins(self):
         src = BUILD.read_text()
         self.assertIn('-c "$CON"', src, "build.sh must install with the constraints file")

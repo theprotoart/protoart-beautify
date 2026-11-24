@@ -152,9 +152,11 @@ BUNDLE_RT="/Applications/$APP_NAME.app/Contents/Resources/runtime"
 # command-line tools we never run (their #! lines point at this Mac's build folder)
 rm -f "$RES/runtime/bin/"{pip,pip3,pip3.12,idle3,idle3.12,2to3,2to3-3.12,pydoc3,pydoc3.12,python3-config,python3.12-config}
 rm -rf "$RES/runtime/lib/pkgconfig"
-# text files that record where Python was installed → generic bundle path
-{ grep -rlI "$PY_DIR" "$RES/runtime" 2>/dev/null || true; } | while IFS= read -r f; do
-  LC_ALL=C sed -i '' "s#$PY_DIR#$BUNDLE_RT#g" "$f"
+# text files that record where Python was installed → generic bundle path. Matches any earlier location too (uv
+# writes the folder it first installed Python in, which stays the same after the project is moved).
+PY_ANY="[^\"' ]*/\.build/python/cpython-$PY_PATCH-macos-$PY_ARCH-none"
+{ grep -rlIE "$PY_ANY|$PY_DIR" "$RES/runtime" 2>/dev/null || true; } | while IFS= read -r f; do
+  LC_ALL=C sed -i '' -E -e "s#$PY_DIR#$BUNDLE_RT#g" -e "s#$PY_ANY#$BUNDLE_RT#g" "$f"
 done
 # the shared library's own ID (not used to load it, but it records the build path)
 install_name_tool -id "@rpath/libpython$PY_VERSION.dylib" "$RES/runtime/lib/libpython$PY_VERSION.dylib" 2>/dev/null || true
@@ -163,8 +165,9 @@ find "$RES" -name "__pycache__" -type d -prune -exec rm -rf {} +
 say "Pre-compiling Python bytecode (faster launches)"
 "$HOST_PY" -I -B -m compileall -q -j 0 -s "$RES" -p "/Applications/$APP_NAME.app/Contents/Resources" \
   "$RES/engine" "$RES/site-packages" "$RES/runtime/lib/python$PY_VERSION" >/dev/null 2>&1 || true
-LEAKS="$(grep -rlI "$HOME" "$APP" 2>/dev/null | head -5 || true)"
-[[ -z "$LEAKS" ]] && echo "   no personal paths left in the bundle" || { echo "   still mentions $HOME:"; echo "$LEAKS"; }
+LEAKS="$(grep -rlI -e "$HOME" -e "/Users/$(id -un)" "$APP" 2>/dev/null | head -5 || true)"
+[[ -z "$LEAKS" ]] && echo "   no personal paths left in the bundle" || {
+  echo "   STOPPED: the bundle still mentions your home folder ($HOME):"; echo "$LEAKS"; exit 1; }
 
 # ── 5. Native app (SwiftUI) ───────────────────────────────────────────────────
 say "Compiling the SwiftUI app"
