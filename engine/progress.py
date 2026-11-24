@@ -99,7 +99,8 @@ class Tracker:
     def esrgan_tile_done(self) -> None:
         self.esrgan_done += 1
         self.rate["esrgan_tile"] = (self.clock() - self.phase_t0) / self.esrgan_done
-        self._send(f"Pre-upscaling (ESRGAN 4×) — tile {self.esrgan_done}/{self.plan.esrgan_tiles}")
+        name = getattr(self, "upscaler_label", "4x-UltraSharp")
+        self._send(f"Pre-upscaling ({name}) — tile {self.esrgan_done}/{self.plan.esrgan_tiles}")
 
     def encode_start(self) -> None:
         self.phase, self.phase_t0 = "encode", self.clock()

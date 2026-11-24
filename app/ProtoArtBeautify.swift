@@ -1323,7 +1323,7 @@ struct Upscaler: Identifiable {
     static let all: [Upscaler] = [
         Upscaler(id: "esrgan", key: "ULTRASHARP", name: "4x-UltraSharp", note: "The original · built in", nonCommercial: true),
         Upscaler(id: "up_ultrasharp_v2", key: "ULTRA V2", name: "4x-UltraSharp V2",
-                 note: "Best quality, slowest · 140 MB", nonCommercial: true),
+                 note: "Best quality, very slow (minutes on 8 GB Macs) · 140 MB", nonCommercial: true),
         Upscaler(id: "up_ultrasharp_v2_lite", key: "V2 LITE", name: "4x-UltraSharp V2 Lite",
                  note: "Most of V2's quality, fast · 30 MB", nonCommercial: true),
         Upscaler(id: "up_nomos_webphoto", key: "WEB PHOTO", name: "4xNomosWebPhoto",

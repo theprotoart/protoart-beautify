@@ -553,7 +553,10 @@ class Enhancer:
         plan, (th, tw) = plan_work(image.width, image.height, upscale_factor, p.tile_tokens,
                                    self.up.esrgan.tile_for(p.esrgan_tile), steps, denoise_strength, p.esrgan_overlap)
         rate_key = profile + ("-turbo" if use_turbo else "")
+        if self.up.esrgan is not self.upscalers["esrgan"]:  # other upscalers run at their own speed (time estimates)
+            rate_key += "-" + self.up.esrgan.label
         tracker = Tracker(plan=plan, emit=status, memory=self.rates.setdefault(rate_key, {}))
+        tracker.upscaler_label = self.up.esrgan.label
         self.up.tracker = tracker
         tracker._send(f"Pre-upscaling ({self.up.esrgan.label})")
 
