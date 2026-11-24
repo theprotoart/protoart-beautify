@@ -43,8 +43,8 @@ has its own licence, which you accept by using it. **Some are non-commercial.**
 
 | Model | Source | Licence |
 | --- | --- | --- |
-| Juggernaut Reborn (SD 1.5) UNet, text encoder, autoencoder | `refiners/juggernaut.reborn.sd1_5.*` | CreativeML OpenRAIL-M |
-| Tile ControlNet (SD 1.5) | `refiners/controlnet.sd1_5.tile` | CreativeML OpenRAIL-M |
+| Juggernaut Reborn (SD 1.5) UNet, text encoder, autoencoder | `refiners/sd15.juggernaut.reborn.*` | CreativeML OpenRAIL-M |
+| Tile ControlNet (SD 1.5) | `refiners/sd15.controlnet.tile` | CreativeML OpenRAIL-M |
 | 4x-UltraSharp (ESRGAN) | `philz1337x/upscaler` | CC BY-NC-SA 4.0 (**non-commercial**) |
 | JuggernautNegative embedding | `philz1337x/embeddings` | see its source |
 | more_details, SDXLrender LoRAs | `philz1337x/loras` | see their sources |
@@ -53,5 +53,10 @@ has its own licence, which you accept by using it. **Some are non-commercial.**
 | CodeFormer (Face Fix, downloaded on first use) | CodeFormer v0.1.0 release file, via `fofr/comfyui` (byte-identical, SHA-256 pinned) | S-Lab License 1.0 (**non-commercial**) |
 | IP-Adapter Plus SD 1.5 (Likeness, downloaded on first use) | `refiners/sd15.ip_adapter.plus` (converted from `h94/IP-Adapter` `ip-adapter-plus_sd15`) | Apache-2.0 |
 | OpenCLIP ViT-H/14 image encoder (Likeness, downloaded on first use) | `refiners/sd21.unclip.image_encoder` | OpenRAIL++ |
+| 4x-UltraSharp V2 and V2 Lite (Upscaler, on first use) | `Kim2091/UltraSharpV2` | CC BY-NC-SA 4.0 (**non-commercial**) |
+| 4x-AnimeSharp (Upscaler, on first use) | `Kim2091/AnimeSharp` | CC BY-NC-SA 4.0 (**non-commercial**) |
+| 4xNomosWebPhoto RealPLKSR, 4xNomos8kSC (Upscaler, on first use) | Philip Hofmann's releases, `github.com/Phhofm/models` | CC BY 4.0 |
+| Real-ESRGAN x4plus, general x4v3, x4plus Anime 6B (Upscaler, on first use) | `github.com/xinntao/Real-ESRGAN` releases | BSD-3-Clause |
+| LaMa big-lama (Remove, on first use) | `michaelgold/big-lama` (safetensors of advimman/lama's big-lama) | Apache-2.0 |
 
 Check these licences before any commercial use of pictures made with the AI enhancement.

@@ -20,7 +20,7 @@ done
 
 APP_NAME="ProtoArt Beautify"
 BUNDLE_ID="com.protoart.beautify"
-VERSION="1.3.3"
+VERSION="1.4.0"
 PY_VERSION="3.12"
 PY_PATCH="3.12.15"   # exact Python release bundled in the app (update deliberately, then re-test)
 

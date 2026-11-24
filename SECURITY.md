@@ -102,3 +102,14 @@ Checked: the code on `main` (commit `20da48e`), all git history and branches, an
 2. **Pin the `uv` installer** to a fixed version and consider `--require-hashes` (a hash for every package file).
    Both need PyPI and astral.sh access from the build Mac.
 3. **Close Dependabot PR #1** (above). Future security PRs will update `engine/constraints*.txt`: test before merging.
+
+## Added in 1.4.0 (features ported from Protoart Studio)
+
+| Item | What we checked | Status |
+|------|-----------------|--------|
+| New downloads (8 upscalers, LaMa) | Each file is pinned to an exact version (a Hugging Face commit or a GitHub release file) and to its SHA-256, checked by the app as it downloads and by the engine before every load. The fingerprints were confirmed by downloading each file, and the 5 older `.pth` files were checked to contain only tensor data (no code references). LaMa is safetensors (data only); the common `big-lama.pt` was avoided because spandrel opens `.pt` files with TorchScript, which can run code. | OK |
+| Update checker | Off until you say yes (asked once), or when you choose Check for Updates…. It only accepts installers from this repository's own releases on github.com, refuses a release without a `.sha256` file, and checks the download against it before it can be installed. The installer swaps the app atomically and puts the old one back if anything fails. Note: the checksum is published beside the installer, so it guards against broken or swapped downloads, not against someone who controls the GitHub account. | OK |
+| Remove spots | The engine only reads the PNGs the app wrote (your photo, decoded by macOS, and your marks); a test proves other formats are refused. The result replaces nothing on disk: it lives in the temporary folder and is deleted when the app opens and quits. | OK |
+| Memory tiers | Same pictures, smaller or larger working pieces by this Mac's memory; upscalers retry on the CPU instead of failing. | OK |
+| Tests | `python3 -m unittest discover -s engine/tests -v` (23 tests) and the app's `--selftest-features` (17 checks), all passing on an 8 GB Apple Silicon Mac. | OK |
+

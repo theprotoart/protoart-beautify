@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.0 — 2026-11-23
+New features ported from Protoart Studio.
+- **Upscaler choice** (new Upscaler panel): pick the 4× upscaler used for INSTANT and before the AI adds detail.
+  4x-UltraSharp stays built in; also 4x-UltraSharp V2 (best, slow) and V2 Lite (fast), 4xNomosWebPhoto (phone and
+  web photos), 4xNomos8kSC (natural), Real-ESRGAN x4plus and general (quick), 4x-AnimeSharp and Real-ESRGAN Anime 6B.
+  Each downloads from its author's release the first time it's picked and is SHA-256-checked before every load.
+- **Remove spots** (new Remove panel): paint over scratches, dust, blemishes or things in the way (Brush, Lasso,
+  Wand, Subject and Text all work), then HEAL. LaMa fills them in from their surroundings in a few seconds; the
+  healed photo becomes the Before and is what gets enhanced. Your file is never changed; UNDO steps back. 195 MB,
+  downloaded on first use (safetensors, SHA-256-checked).
+- **Protect ⇄ Invert**: protect everything except the painted areas, with one click.
+- **Memory tiers**: the 16 GB+ switch now uses Protoart Studio's measured settings for this Mac's real memory
+  (16–23 GB keeps some memory-saving on; 24 GB+ runs the fastest settings). Upscalers fall back to the CPU if the
+  Apple GPU can't run them.
+- **Updates**: ProtoArt Beautify → Check for Updates…, and an optional daily check (asked once). It only asks GitHub
+  for the latest version; the installer is checked against its published SHA-256 before it's installed.
+- Fix: an add-on asked for while another was downloading is now downloaded too (it used to be skipped).
+
 ## 1.3.3 — 2026-11-14
 Security update (see the audit in SECURITY.md). No changes to how the app looks or works.
 - **Every model file is now fingerprint-checked** (SHA-256) before it's used, including the four large ones. A file that doesn't match is deleted and never used. The first-time setup spends about 10 extra seconds on this.
