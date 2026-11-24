@@ -3,6 +3,7 @@
 Protocol (one JSON object per line):
   stdin  -> {"id": "...", "cmd": "enhance", "input": "/path/in", "output": "/path/out.png", "params": {...}}
             {"id": "...", "cmd": "warmup"}      (download + load models)
+            {"id": "...", "cmd": "heal", "input": "/path/in.png", "mask": "/path/mask.png", "output": "/path/out.png"}
             {"id": "...", "cmd": "quit"}
   stdout <- {"id": "...", "event": "status", "message": "...", "fraction": 0.42 | null}
             {"id": "...", "event": "done", "output": "/path/out.png", "width": W, "height": H, "seconds": S}
@@ -65,6 +66,28 @@ def get_face_fixer():
     return _face_fixer
 
 
+_heal_model = None
+
+
+def get_heal_model(status):
+    """LaMa for Remove spots (downloaded by the app the first time; hash-checked before it's loaded)."""
+    global _heal_model
+    if _heal_model is None:
+        from models import _verify, downloaded
+        path = downloaded("lama")
+        if path is None:
+            raise RuntimeError("The Remove model isn't downloaded yet. Press HEAL again to download it (first time only).")
+        _verify("lama", path)
+        status("Loading the Remove model (first use)", None)
+        import platform
+        import torch
+        from heal import load
+        dev = torch.device("mps") if (platform.machine() != "x86_64" and torch.backends.mps.is_available()) \
+            else torch.device("cpu")
+        _heal_model = load(path, dev)
+    return _heal_model
+
+
 _ICC: list = []
 
 
@@ -107,6 +130,21 @@ def handle(req: dict) -> None:
               "eta": None if eta is None else round(eta, 1)})
 
     cmd = req.get("cmd")
+    if cmd == "heal":
+        # 🩹 Remove spots: only the painted area changes (the app made both PNGs from your photo and your marks)
+        from PIL import Image
+        t0 = time.time()
+        model = get_heal_model(status)
+        status("Removing the painted spots", None)
+        image = open_image(req["input"])
+        mask = Image.open(req["mask"], formats=["PNG"]).convert("L")
+        from heal import heal
+        out = heal(image, mask, model)
+        icc = _srgb_icc()
+        out.save(req["output"], format="PNG", **({"icc_profile": icc} if icc else {}))
+        emit({"id": rid, "event": "done", "output": req["output"], "width": out.width, "height": out.height,
+              "seconds": round(time.time() - t0, 2)})
+        return
     if cmd == "warmup":
         get_enhancer(status)
         emit({"id": rid, "event": "done"})

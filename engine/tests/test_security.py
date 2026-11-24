@@ -31,8 +31,11 @@ def load_models(data_dir: Path):
 def swift_models() -> tuple[dict[str, tuple[str, str, str]], dict[str, str]]:
     """The app's download list and pinned hashes, read from the Swift source."""
     src = SWIFT.read_text()
-    files = {m.group(1): (m.group(2), m.group(3), m.group(4)) for m in re.finditer(
-        r'ModelFile\(key: "([^"]+)", repo: "([^"]+)", file: "([^"]+)",\s*rev: "([0-9a-f]{40})"', src)}
+    files = {}
+    for m in re.finditer(r'ModelFile\(key: "([^"]+)", repo: "([^"]+)", file: "([^"]+)",\s*rev: "([^"]+)"(.*?)\)(?:,|\n)',
+                         src, re.S):
+        direct = re.search(r'direct: "([^"]+)"', m.group(5))
+        files[m.group(1)] = (m.group(2), m.group(3), m.group(4), direct.group(1) if direct else "")
     block = src[src.index("static let pinnedSHA256"):]
     block = block[:block.index("]\n")]
     pins = dict(re.findall(r'"([a-z0-9_]+)": "([0-9a-f]{64})"', block))
@@ -55,10 +58,20 @@ class ModelIntegrity(unittest.TestCase):
 
     def test_app_and_engine_agree_on_files_revisions_and_hashes(self):
         files, pins = swift_models()
-        remotes = {r.key: (r.repo_id, r.filename, r.revision) for r in self.models.REMOTES}
+        remotes = {r.key: (r.repo_id, r.filename, r.revision, r.url) for r in self.models.REMOTES}
         self.assertEqual(files, remotes, "app/ProtoArtBeautify.swift and engine/models.py list different models")
         for key, h in pins.items():
             self.assertEqual(h, self.models.PINNED_SHA256.get(key), f"hash for {key} differs between app and engine")
+
+    def test_files_are_pinned_to_exact_versions(self):
+        for r in self.models.REMOTES:
+            if r.url:  # a GitHub release file: its exact address, under that project's releases
+                owner_repo = r.repo_id.removeprefix("github:")
+                self.assertTrue(r.repo_id.startswith("github:"), r.key)
+                self.assertEqual(r.url, f"https://github.com/{owner_repo}/releases/download/{r.revision}/{r.filename}",
+                                 r.key)
+            else:      # a Hugging Face file: an exact commit, never "main"
+                self.assertRegex(r.revision, r"^[0-9a-f]{40}$", r.key)
 
     def test_model_repositories_use_their_current_names(self):
         # These four were renamed on Hugging Face; the old names only work through redirects.

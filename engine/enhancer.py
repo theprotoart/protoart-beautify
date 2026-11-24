@@ -8,7 +8,7 @@ for 8 GB machines.
 from __future__ import annotations
 
 import gc
-from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -22,33 +22,11 @@ from refiners.foundationals.latent_diffusion.stable_diffusion_1.multi_upscaler i
     UpscalerTarget,
 )
 
-from esrgan import ESRGAN, tile_origins
+from esrgan import ESRGAN, UPSCALERS, tile_origins
 from progress import Plan, Tracker
 
 Status = Callable[..., None]  # (message, fraction, eta_seconds=None)
-ESRGAN_OVERLAP = 16
-# Attention is computed in chunks of this many query tokens. At 512 px tiles (4096 tokens) this
-# cuts the attention working memory ~4x, which keeps 8 GB Macs out of swap.
-ATTENTION_SLICE = 1024
-
-
-@dataclass(frozen=True)
-class MemoryProfile:
-    name: str
-    max_input_short_side: int   # input is downscaled to this before enhancing
-    max_output_megapixels: float
-    latent_tile: tuple[int, int]  # legacy fixed tile (H, W) in latent units; unused by the planner
-    tile_tokens: int              # max latent tokens per diffusion tile (planner picks the fewest tiles)
-    vae_tile: int               # pixels
-    esrgan_tile: int            # pixels (input side)
-
-
-PROFILES = {
-    # 64x64 latent tiles = 512 px, SD1.5's native size: attention stays ~0.3 GB.
-    "8gb": MemoryProfile("8 GB", 512, 8.0, (64, 64), 9216, 512, 192),  # 9216 = 96x96: a 768 px square in one tile
-    # Space defaults (144x112 latent tiles), for 16 GB+ machines.
-    "16gb": MemoryProfile("16 GB+", 768, 16.0, (144, 112), 16384, 1024, 256),
-}
+from memory import ATTENTION_SLICE, ESRGAN_OVERLAP, PROFILES, MemoryProfile, ram_gb, resolve_profile  # noqa: F401
 
 
 def pick_device() -> tuple[torch.device, torch.dtype]:
@@ -224,6 +202,7 @@ class _ReportingUpscaler(MultiUpscaler):
 
     esrgan: ESRGAN
     esrgan_tile: int = 192
+    esrgan_overlap: int = ESRGAN_OVERLAP
     tracker: Tracker | None = None
 
     skip_esrgan: bool = False       # Face Detail: the close-up is already at working size
@@ -240,8 +219,8 @@ class _ReportingUpscaler(MultiUpscaler):
             if tr:
                 tr.esrgan_tile_done()
 
-        image = self.esrgan.upscale(image, tile=self.esrgan_tile, overlap=ESRGAN_OVERLAP, on_tile=on_tile)
-        free_memory(self.device)
+        image = self.esrgan.upscale_safe(image, tile=self.esrgan_tile, overlap=self.esrgan_overlap, on_tile=on_tile)
+        free_memory(self.device)  # the upscaler's working memory goes back before the diffusion starts
         image = super().pre_upscale(image=image, upscale_factor=upscale_factor / 4)
         # Pad to a multiple of 64 px (latent multiple of 8) so the planner can use whole-image or
         # evenly sized tiles instead of many overlapping 512 px ones; the padding is cropped off after.
@@ -332,9 +311,10 @@ def choose_tile(lat_h: int, lat_w: int, budget: int) -> tuple[int, int]:
 
 
 def plan_work(width: int, height: int, factor: float, tile_tokens: int,
-              esrgan_tile: int, steps: int, denoise: float) -> tuple[Plan, tuple[int, int]]:
+              esrgan_tile: int, steps: int, denoise: float,
+              esrgan_overlap: int = ESRGAN_OVERLAP) -> tuple[Plan, tuple[int, int]]:
     """Count the work the same way the pipeline will do it; returns the plan and the latent tile."""
-    esrgan_tiles = len(tile_origins(height, width, esrgan_tile, ESRGAN_OVERLAP))
+    esrgan_tiles = len(tile_origins(height, width, esrgan_tile, esrgan_overlap))
     # ESRGAN gives 4x; MultiUpscaler.pre_upscale then resizes by factor/4, floored to /8; then padded to /64.
     out_w = int((width * 4 * (factor / 4)) // 8 * 8)
     out_h = int((height * 4 * (factor / 4)) // 8 * 8)
@@ -403,6 +383,7 @@ class Enhancer:
         )
         self.up = _ReportingUpscaler(checkpoints=ckpt, device=self.device, dtype=self.dtype)
         self.up.esrgan = ESRGAN(paths["esrgan"], device=self.device, dtype=self.dtype)
+        self.upscalers: dict[str, ESRGAN] = {"esrgan": self.up.esrgan}  # built in + the last one picked
         self.up.manager.update_scales({"more_details": 0.5, "sdxl_render": 1.0})  # the Space's LoRA mix
         self.fused = fuse_loras(self.up.sd.unet, self.up.sd.clip_text_encoder)
         # Turbo: distilled few-step LCM-LoRA (optional download). 8/64 = its alpha / rank.
@@ -433,8 +414,30 @@ class Enhancer:
         free_memory(self.device)
         status("Models loaded", None)
 
+    def use_upscaler(self, key: str, status: Status) -> ESRGAN:
+        """The upscaler picked in the app (4x-UltraSharp if none). Others are hash-checked before every load (several
+        are pickle files) and only the built-in one and the last one picked stay in memory."""
+        key = key if key in UPSCALERS else "esrgan"
+        if key not in self.upscalers:
+            from models import _verify, downloaded
+            path = downloaded(key)
+            if path is None:
+                raise RuntimeError(f"{UPSCALERS[key][0]} isn't downloaded yet. Pick it again to download it "
+                                   "(the first time only), or pick 4x-UltraSharp.")
+            _verify(key, path)
+            label, fp32, max_tile = UPSCALERS[key]
+            status(f"Loading {label}", None)
+            for k in [k for k in self.upscalers if k != "esrgan"]:
+                del self.upscalers[k]
+            free_memory(self.device)
+            self.upscalers[key] = ESRGAN(path, device=self.device, dtype=self.dtype, fp32=fp32, label=label,
+                                         max_tile=max_tile)
+        self.up.esrgan = self.upscalers[key]
+        return self.up.esrgan
+
     def _instant(self, image: Image.Image, factor: float, p: "MemoryProfile", status: Status) -> Image.Image:
-        tiles = len(tile_origins(image.height, image.width, p.esrgan_tile, ESRGAN_OVERLAP))
+        name = self.up.esrgan.label
+        tiles = len(tile_origins(image.height, image.width, self.up.esrgan.tile_for(p.esrgan_tile), p.esrgan_overlap))
         done = [0]
         t0 = __import__("time").monotonic()
 
@@ -443,11 +446,11 @@ class Enhancer:
             done[0] += 1
             el = __import__("time").monotonic() - t0
             eta = el / done[0] * (tiles - done[0])
-            status(f"Upscaling (ESRGAN 4×) — tile {done[0]}/{tiles}", min(0.99, done[0] / tiles), eta)
+            status(f"Upscaling ({name}) — tile {done[0]}/{tiles}", min(0.99, done[0] / tiles), eta)
 
-        status("Upscaling (ESRGAN 4×)", 0.0, None)
+        status(f"Upscaling ({name})", 0.0, None)
         try:
-            big = self.up.esrgan.upscale(image, tile=p.esrgan_tile, overlap=ESRGAN_OVERLAP, on_tile=on_tile)
+            big = self.up.esrgan.upscale_safe(image, tile=p.esrgan_tile, overlap=p.esrgan_overlap, on_tile=on_tile)
         finally:
             free_memory(self.device)
         w, h = round(image.width * factor), round(image.height * factor)
@@ -478,9 +481,12 @@ class Enhancer:
         low_memory: bool = True,
         mode: str = "detail",  # "detail" (diffusion) or "instant" (ESRGAN only, no new detail)
         likeness: float = 0.0,  # 0 = off; >0 = IP-Adapter Plus strength (keeps the photo's people and things)
+        upscaler: str = "esrgan",  # the 4x upscaler (UPSCALERS) for INSTANT and the AI's pre-upscale
     ) -> Image.Image:
-        p = PROFILES.get(profile, PROFILES["8gb"])
+        profile, p = resolve_profile(profile)
         self.up.esrgan_tile = p.esrgan_tile
+        self.up.esrgan_overlap = p.esrgan_overlap
+        self.use_upscaler(upscaler, status)
 
         # 0. Cap the input size (the Space uses 768; 512 keeps 8 GB Macs comfortable).
         short = min(image.size)
@@ -514,10 +520,13 @@ class Enhancer:
         if mode == "instant":
             return self._instant(image, upscale_factor, p, status)
 
-        # Low-memory: smaller attention chunks and give GPU cache back to macOS after every pass.
-        self.up.low_memory = bool(low_memory)
+        # Low-memory (the 8 and 16 GB tiers): smaller attention chunks and GPU cache handed back to macOS after every
+        # pass. 24 GB+ Macs attend over a whole tile at once and keep the cache (faster, same picture).
+        low = bool(low_memory) and p.low_memory
+        self.up.low_memory = low
+        sl = p.attention_slice
         for layer in self.attention_layers:
-            layer.slice_size = ATTENTION_SLICE // 2 if low_memory else ATTENTION_SLICE
+            layer.slice_size = (sl // 2 if low else sl) if sl else None
 
         use_turbo, solver, num_inference_steps = self._set_turbo(turbo, solver, num_inference_steps, status)
 
@@ -541,12 +550,12 @@ class Enhancer:
             self.up.likeness = None
 
         steps = int(num_inference_steps)
-        plan, (th, tw) = plan_work(image.width, image.height, upscale_factor, p.tile_tokens, p.esrgan_tile,
-                                   steps, denoise_strength)
+        plan, (th, tw) = plan_work(image.width, image.height, upscale_factor, p.tile_tokens,
+                                   self.up.esrgan.tile_for(p.esrgan_tile), steps, denoise_strength, p.esrgan_overlap)
         rate_key = profile + ("-turbo" if use_turbo else "")
         tracker = Tracker(plan=plan, emit=status, memory=self.rates.setdefault(rate_key, {}))
         self.up.tracker = tracker
-        tracker._send("Pre-upscaling (ESRGAN 4×)")
+        tracker._send(f"Pre-upscaling ({self.up.esrgan.label})")
 
         gen_device = self.device if self.device.type in ("mps", "cuda") else torch.device("cpu")
         generator = torch.Generator(device=gen_device)
@@ -608,7 +617,7 @@ class Enhancer:
 
         if not boxes:
             return image, 0
-        p = PROFILES.get(profile, PROFILES["8gb"])
+        profile, p = resolve_profile(profile)
         strength = float(max(0.1, min(0.8, strength)))
         use_turbo, solver, steps = self._set_turbo(turbo, solver, num_inference_steps, status)
         self.up.low_memory = True

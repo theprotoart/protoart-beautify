@@ -134,6 +134,15 @@ with torch.no_grad():
                    connect_list=["32", "64", "128", "256"]).eval()(x, w=0.5, adain=True)[0]
     b = RestoreFormer().eval()(x)[0]
 print(f"   face fix networks OK: CodeFormer {tuple(a.shape)}, RestoreFormer {tuple(b.shape)}")
+# Remove spots (LaMa) builds and runs through spandrel; the new upscalers' layouts are there too.
+import memory, heal  # noqa
+from spandrel.architectures.LaMa import LaMa
+from spandrel.architectures.DAT import DATArch  # noqa
+from spandrel.architectures.PLKSR import PLKSRArch  # noqa
+from spandrel.architectures.Compact import CompactArch  # noqa
+with torch.no_grad():
+    c = LaMa(in_nc=4, out_nc=3).eval()(torch.rand(1, 3, 64, 64), torch.zeros(1, 1, 64, 64))
+print(f"   Remove (LaMa) network OK: {tuple(c.shape)} · upscaler layouts: DAT, RealPLKSR, Real-ESRGAN")
 PY
 fi
 

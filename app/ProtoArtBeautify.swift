@@ -31,6 +31,7 @@ struct EnhanceSettings: Equatable, Codable {
     var faceDetailStrength = 0.15
     var faceDetailHair = false
     var protectFaces = false   // faces skip the AI re-detailing: Face Fix runs first on a clean upscale
+    var upscaler = "esrgan"    // the 4x upscaler for INSTANT and the AI's pre-upscale (Upscaler.all)
 
     init() {}
 
@@ -47,6 +48,8 @@ struct EnhanceSettings: Equatable, Codable {
         keepTones = v(.keepTones, z.keepTones); faceDetail = v(.faceDetail, z.faceDetail)
         faceDetailStrength = v(.faceDetailStrength, z.faceDetailStrength); faceDetailHair = v(.faceDetailHair, z.faceDetailHair)
         protectFaces = v(.protectFaces, z.protectFaces)
+        upscaler = v(.upscaler, z.upscaler)
+        if Upscaler.find(upscaler) == nil { upscaler = z.upscaler }
     }
 
     /// Protect Faces only matters with the AI (INSTANT doesn't re-detail anything).
@@ -74,6 +77,7 @@ struct EnhanceSettings: Equatable, Codable {
             "turbo": turbo,
             "low_memory": true,
             "keep_tones": keepTones,
+            "upscaler": upscaler,
         ]
         if maxSide > 0 { p["max_output_side"] = maxSide }
         if mode == "detail" && likeness > 0 { p["likeness"] = likeness }
@@ -187,18 +191,19 @@ enum ProtectMask {
     }
 
     /// Everything painted, as a grey mask (white = keep out of the AI re-detailing), width x height pixels.
-    static func render(_ strokes: [ProtectStroke], width: Int, height: Int) -> CGImage? {
+    /// Inverted (⇄): everything except the painted areas is white.
+    static func render(_ strokes: [ProtectStroke], width: Int, height: Int, inverted: Bool = false) -> CGImage? {
         guard width > 0, height > 0, strokes.contains(where: { !$0.erase }),
               let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
         else { return nil }
-        ctx.setFillColor(gray: 0, alpha: 1)
+        ctx.setFillColor(gray: inverted ? 1 : 0, alpha: 1)
         ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
         ctx.setLineCap(.round); ctx.setLineJoin(.round)
         let w = CGFloat(width), h = CGFloat(height)
         let full = CGRect(x: 0, y: 0, width: w, height: h)
         for s in strokes {
-            let v: CGFloat = s.erase ? 0 : 1
+            let v: CGFloat = s.erase != inverted ? 0 : 1
             ctx.setStrokeColor(gray: v, alpha: 1); ctx.setFillColor(gray: v, alpha: 1)
             let pts = s.points.map { CGPoint(x: $0.x * w, y: h - $0.y * h) }   // CG's origin is bottom-left
             switch s.kind {
@@ -332,8 +337,14 @@ struct QueueItem: Identifiable, Equatable {
     var facesFixed: Int?        // Face Fix ran: how many faces it restored
     var job: JobSnapshot?       // + QUEUE: the settings this row was queued with (nil = use the current ones)
     var protectStrokes: [ProtectStroke] = []   // 🖌 areas painted to keep out of the AI re-detailing
+    var protectInverted = false                // ⇄ protect everything except the painted areas
     var protectPainted: Bool { protectStrokes.contains { !$0.erase } }
+    var healStrokes: [ProtectStroke] = []      // 🩹 spots painted for Remove (not yet healed)
+    var healedURL: URL?                        // the photo with spots removed: used instead of `url` from then on
+    var healUndo: [URL?] = []                  // earlier healed versions (nil = the original), for UNDO
 
+    /// The picture the app enhances and shows as Before: the healed copy once spots were removed, else the file.
+    var inputURL: URL { healedURL ?? url }
     var name: String { url.lastPathComponent }
     var isFinished: Bool {
         switch state { case .done, .stopped, .cancelled, .failed: return true; default: return false }
@@ -343,7 +354,7 @@ struct QueueItem: Identifiable, Equatable {
         a.id == b.id && a.state == b.state && a.fraction == b.fraction && a.eta == b.eta
             && a.message == b.message && a.outputURL == b.outputURL && a.thumbnail === b.thumbnail
             && a.savedURL == b.savedURL && a.filtersBaked == b.filtersBaked && a.facesFixed == b.facesFixed
-            && a.job == b.job
+            && a.job == b.job && a.healedURL == b.healedURL && a.protectInverted == b.protectInverted
     }
 }
 
@@ -1187,8 +1198,9 @@ struct ModelFile {
     let fp16: Bool   // the engine converts these to fp16 once and keeps only that copy
     let mb: Int
     var optional = false  // fetched only when a feature needs it (face fix), not at first launch
+    var direct: String? = nil  // a GitHub release file: its exact address (repo/rev just describe it)
 
-    var url: URL { URL(string: "https://huggingface.co/\(repo)/resolve/\(rev)/\(file)")! }
+    var url: URL { URL(string: direct ?? "https://huggingface.co/\(repo)/resolve/\(rev)/\(file)")! }
     var rawName: String { key + "." + (file as NSString).pathExtension }
 }
 
@@ -1226,6 +1238,32 @@ enum ModelStore {
                   rev: "2516bc6c2cbd933e7949f7c2c0f076790ff3bf35", fp16: false, mb: 94, optional: true),
         ModelFile(key: "clip_image_h", repo: "refiners/sd21.unclip.image_encoder", file: "model.safetensors",
                   rev: "4a36eec8c6fcfa9911a9b3290c707b8ad7591cc3", fp16: false, mb: 1206, optional: true),
+        // Upscalers you can pick instead of 4x-UltraSharp (Protoart Studio's Instant upscalers), each downloaded the
+        // first time it's picked, from its author's own release.
+        ModelFile(key: "up_ultrasharp_v2", repo: "Kim2091/UltraSharpV2", file: "4x-UltraSharpV2.safetensors",
+                  rev: "2d1db39ff692c111da92112d49f833e4ad7035ae", fp16: false, mb: 134, optional: true),
+        ModelFile(key: "up_ultrasharp_v2_lite", repo: "Kim2091/UltraSharpV2", file: "4x-UltraSharpV2_Lite.safetensors",
+                  rev: "2d1db39ff692c111da92112d49f833e4ad7035ae", fp16: false, mb: 29, optional: true),
+        ModelFile(key: "up_nomos_webphoto", repo: "github:Phhofm/models", file: "4xNomosWebPhoto_RealPLKSR.safetensors",
+                  rev: "4xNomosWebPhoto_RealPLKSR", fp16: false, mb: 29, optional: true,
+                  direct: "https://github.com/Phhofm/models/releases/download/4xNomosWebPhoto_RealPLKSR/4xNomosWebPhoto_RealPLKSR.safetensors"),
+        ModelFile(key: "up_nomos8ksc", repo: "github:Phhofm/models", file: "4xNomos8kSC.pth",
+                  rev: "4xNomos8kSC", fp16: false, mb: 64, optional: true,
+                  direct: "https://github.com/Phhofm/models/releases/download/4xNomos8kSC/4xNomos8kSC.pth"),
+        ModelFile(key: "up_realesrgan_x4plus", repo: "github:xinntao/Real-ESRGAN", file: "RealESRGAN_x4plus.pth",
+                  rev: "v0.1.0", fp16: false, mb: 64, optional: true,
+                  direct: "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"),
+        ModelFile(key: "up_realesr_general_x4v3", repo: "github:xinntao/Real-ESRGAN", file: "realesr-general-x4v3.pth",
+                  rev: "v0.2.5.0", fp16: false, mb: 5, optional: true,
+                  direct: "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth"),
+        ModelFile(key: "up_animesharp", repo: "Kim2091/AnimeSharp", file: "4x-AnimeSharp.safetensors",
+                  rev: "7696d95ced82b0c1f2a41f6ac73336133f0a90e1", fp16: false, mb: 32, optional: true),
+        ModelFile(key: "up_realesrgan_anime6b", repo: "github:xinntao/Real-ESRGAN", file: "RealESRGAN_x4plus_anime_6B.pth",
+                  rev: "v0.2.2.4", fp16: false, mb: 18, optional: true,
+                  direct: "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"),
+        // Remove spots: LaMa (Apache-2.0) as safetensors, downloaded the first time HEAL is used.
+        ModelFile(key: "lama", repo: "michaelgold/big-lama", file: "big-lama.safetensors",
+                  rev: "98ab7cface89a594b381f32fc7a9f2cae3f91ccc", fp16: false, mb: 195, optional: true),
     ]
 
     /// SHA-256 of every file that is kept exactly as downloaded (checked against Hugging Face's own LFS
@@ -1242,6 +1280,15 @@ enum ModelStore {
         "codeformer": "1009e537e0c2a07d4cabce6355f53cb66767cd4b4297ec7a4a64ca4b8a5684b7",
         "ip_plus": "6eae5d2098fa83e3b8bf416fb46dd77a921ad044650f13890e8d41d7c84a71d2",
         "clip_image_h": "c9f43e359e06f1a237324c4c11734d6acd7fbddbfd3b1ed4f1b525267bedb812",
+        "up_ultrasharp_v2": "2b5db674aa8f3864a696dccd1d07d7cc0500fbf220f35044cd30eee9a7f971a7",
+        "up_ultrasharp_v2_lite": "7a330ef6b7c632477d311ac03499c91c350e35c5986d4a6c295f0628cb871a09",
+        "up_nomos_webphoto": "9be0228f98156a100d6636d99b373ed2785b999723f9adc4cca504329ab157f2",
+        "up_nomos8ksc": "d73b89267320411c7eb0ec7ab56ab17f1044f2408fed211588cee845bee48407",
+        "up_realesrgan_x4plus": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
+        "up_realesr_general_x4v3": "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+        "up_animesharp": "7fc60054d291579acac4fb537efd91c80611cbd281ef8b90f434048cc1313b39",
+        "up_realesrgan_anime6b": "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da",
+        "lama": "326ae1889b92d07c8819c35eaf561f8b290d057536eeb12524b72997f31005ec",
     ]
 
     static func sha256(of url: URL) -> String? {
@@ -1267,6 +1314,32 @@ enum ModelStore {
 
     static var missing: [ModelFile] { files.filter { !$0.optional && !isPresent($0) } }
     static func faceModel(_ kind: String) -> ModelFile? { files.first { $0.key == kind } }
+}
+
+/// The 4x upscalers to pick from (ported from Protoart Studio's ⏩ Instant upscalers). "esrgan" is the built-in
+/// 4x-UltraSharp; the others download the first time they're picked (ModelStore.files, hash-pinned).
+struct Upscaler: Identifiable {
+    let id: String, key: String, name: String, note: String, nonCommercial: Bool
+    static let all: [Upscaler] = [
+        Upscaler(id: "esrgan", key: "ULTRASHARP", name: "4x-UltraSharp", note: "The original · built in", nonCommercial: true),
+        Upscaler(id: "up_ultrasharp_v2", key: "ULTRA V2", name: "4x-UltraSharp V2",
+                 note: "Best quality, slowest · 140 MB", nonCommercial: true),
+        Upscaler(id: "up_ultrasharp_v2_lite", key: "V2 LITE", name: "4x-UltraSharp V2 Lite",
+                 note: "Most of V2's quality, fast · 30 MB", nonCommercial: true),
+        Upscaler(id: "up_nomos_webphoto", key: "WEB PHOTO", name: "4xNomosWebPhoto",
+                 note: "Phone & web photos: noise, blur, JPEG · 30 MB", nonCommercial: false),
+        Upscaler(id: "up_nomos8ksc", key: "NATURAL", name: "4xNomos8kSC",
+                 note: "Photos with natural detail · 67 MB", nonCommercial: false),
+        Upscaler(id: "up_realesrgan_x4plus", key: "REAL-ESRGAN", name: "Real-ESRGAN x4plus",
+                 note: "General photos and pictures · 67 MB", nonCommercial: false),
+        Upscaler(id: "up_realesr_general_x4v3", key: "QUICK", name: "Real-ESRGAN general",
+                 note: "Small and quick · 5 MB", nonCommercial: false),
+        Upscaler(id: "up_animesharp", key: "ANIME", name: "4x-AnimeSharp",
+                 note: "Anime, drawings and text · 33 MB", nonCommercial: true),
+        Upscaler(id: "up_realesrgan_anime6b", key: "ANIME 6B", name: "Real-ESRGAN Anime 6B",
+                 note: "Anime and drawings, crisp lines · 18 MB", nonCommercial: false),
+    ]
+    static func find(_ id: String) -> Upscaler? { all.first { $0.id == id } }
 }
 
 /// One-click CodeFormer settings (the same as Protoart Studio's FACE_PRESETS).
@@ -1433,7 +1506,7 @@ final class ModelDownloader: NSObject, URLSessionDownloadDelegate {
             : (error?.localizedDescription ?? "HTTP \(status)")
         hashMismatch = false
         guard retries <= 5 else {
-            finish("Couldn't download \(f.key) from huggingface.co (\(why)). Check your internet connection or firewall.")
+            finish("Couldn't download \(f.key) from \(f.url.host ?? "the internet") (\(why)). Check your internet connection or firewall.")
             return
         }
         let resume = (error as NSError?)?.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
@@ -1473,6 +1546,7 @@ final class AppModel: ObservableObject {
     @Published var faceStrength: Double { didSet { defaults.set(faceStrength, forKey: "faceStrength") } }
     @Published var faceFidelity: Double { didSet { defaults.set(faceFidelity, forKey: "faceFidelity") } }
     private var faceWaiters: [(String?) -> Void] = []
+    private var optionalWanted: [ModelFile] = []   // every add-on asked for while a download runs
 
     // Detail filters (Bleach Bypass, Dark Contrasts, Detail Extractor)
     @Published var filters = DetailFilters.load() { didSet { if filters != oldValue { filters.save(); refreshFiltered() } } }
@@ -1548,16 +1622,133 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// What the brush is painting: "protect" (areas kept out of the AI) or "heal" (spots for Remove).
+    @Published var paintPurpose = "protect"
+    var healing: Bool { paintPurpose == "heal" }
+
+    /// The marks being painted now (Protect's or Remove's, on the selected photo).
     var selectedStrokes: [ProtectStroke] {
-        get { selected?.protectStrokes ?? [] }
-        set { if let i = items.firstIndex(where: { $0.id == selectedID }) { items[i].protectStrokes = newValue } }
+        get { healing ? (selected?.healStrokes ?? []) : (selected?.protectStrokes ?? []) }
+        set {
+            guard let i = items.firstIndex(where: { $0.id == selectedID }) else { return }
+            if healing { items[i].healStrokes = newValue } else { items[i].protectStrokes = newValue }
+        }
     }
-    func togglePainting() {
-        guard selected != nil else { errorMessage = "Open a photo first, then paint the areas to protect."; return }
+    func togglePainting(_ purpose: String = "protect") {
+        guard selected != nil else {
+            errorMessage = purpose == "heal" ? "Open a photo first, then paint over the spots to remove."
+                                             : "Open a photo first, then paint the areas to protect."
+            return
+        }
+        if painting && paintPurpose != purpose { paintPurpose = purpose; return }   // switch straight over
+        paintPurpose = purpose
         painting.toggle()
     }
     func undoStroke() { if !selectedStrokes.isEmpty { selectedStrokes.removeLast() } }
     func clearStrokes() { selectedStrokes = [] }
+    func clearProtect() {
+        if let i = index(of: selectedID) { items[i].protectStrokes = []; items[i].protectInverted = false }
+    }
+    /// ⇄ Invert (from Protoart Studio's Protect from Enhance): protect everything except the painted areas, or back.
+    func invertProtect() {
+        guard let i = index(of: selectedID), items[i].protectPainted else { return }
+        items[i].protectInverted.toggle()
+    }
+    var protectInverted: Bool { selected?.protectInverted ?? false }
+    func upscalerReady(_ id: String) -> Bool {
+        id == "esrgan" || (ModelStore.faceModel(id).map(ModelStore.isPresent) ?? false)
+    }
+
+    // MARK: 🩹 Remove spots (LaMa, from Protoart Studio's Remove)
+
+    @Published var healBusy = false
+    private var healID: String?
+    private var healItemID: QueueItem.ID?
+    var canUndoHeal: Bool { !(selected?.healUndo.isEmpty ?? true) }
+    var healPainted: Bool { selected?.healStrokes.contains { !$0.erase } ?? false }
+
+    /// Fill the painted spots in from their surroundings. The result becomes this photo's Before (the original
+    /// file is never touched); UNDO goes back a step.
+    func applyHeal() {
+        guard let item = selected, healPainted, !healBusy else { return }
+        guard engineReady else { errorMessage = "Wait until the engine is ready (the light above says Ready), then press HEAL."; return }
+        healBusy = true
+        let itemID = item.id
+        guard let lama = ModelStore.faceModel("lama") else { return }
+        ensureOptional([lama]) { [weak self] err in
+            guard let self else { return }
+            if let err {
+                self.healBusy = false
+                self.errorMessage = "Couldn't download the Remove model (first use, 195 MB): " + err
+                return
+            }
+            self.sendHeal(itemID)
+        }
+    }
+
+    private func sendHeal(_ itemID: QueueItem.ID) {
+        guard let i = index(of: itemID) else { healBusy = false; return }
+        let src = items[i].inputURL, strokes = items[i].healStrokes
+        let id = UUID().uuidString
+        healID = id
+        healItemID = itemID
+        paintNote = "Removing…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Same rule as enhancing: macOS decodes your file and the engine gets PNGs the app wrote itself.
+            var input: String?, mask: String?
+            if let cg = ImageIOHelpers.cgImage(src, maxPixel: 3072), let clean = DetailFilterEngine.toSRGB(cg) {
+                let tag = UUID().uuidString.prefix(8)
+                let ip = Self.tempDir.appendingPathComponent("heal-in-\(tag).png")
+                if (try? DetailFilterEngine.write(clean, to: ip, type: .png)) != nil { input = ip.path }
+                if let m = ProtectMask.render(strokes, width: clean.width, height: clean.height) {
+                    let mp = Self.tempDir.appendingPathComponent("heal-mask-\(tag).png")
+                    if (try? DetailFilterEngine.write(m, to: mp, type: .png)) != nil { mask = mp.path }
+                }
+            }
+            let out = Self.tempDir.appendingPathComponent("healed-\(UUID().uuidString.prefix(8)).png")
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.healID == id else { return }
+                    guard let input, let mask else {
+                        self.healID = nil; self.healBusy = false; self.paintNote = nil
+                        self.errorMessage = "Couldn't read this photo to remove the spots."
+                        return
+                    }
+                    self.engine.send(["id": id, "cmd": "heal", "input": input, "mask": mask, "output": out.path])
+                }
+            }
+        }
+    }
+
+    private func healFinished(_ msg: [String: Any]) {
+        let event = msg["event"] as? String
+        if event == "status" { paintNote = msg["message"] as? String ?? paintNote; return }
+        healID = nil
+        healBusy = false
+        guard let i = index(of: healItemID) else { paintNote = nil; return }
+        if event == "done", let path = msg["output"] as? String {
+            items[i].healUndo.append(items[i].healedURL)
+            items[i].healedURL = URL(fileURLWithPath: path)
+            items[i].healStrokes = []
+            loadMetadata(items[i].id, url: items[i].inputURL)
+            if items[i].id == selectedID { loadPreview() }
+            let secs = msg["seconds"] as? Double ?? 0
+            paintNote = "Removed in \(Fmt.duration(secs)) · press ENHANCE, or paint more"
+        } else {
+            paintNote = nil
+            errorMessage = "Remove didn't work: " + (msg["message"] as? String ?? "unknown error")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { MainActor.assumeIsolated {
+            if self.paintNote?.hasPrefix("Removed") == true { self.paintNote = nil } } }
+    }
+
+    /// Back to the photo before the last HEAL (or the original file).
+    func undoHeal() {
+        guard let i = index(of: selectedID), let prev = items[i].healUndo.popLast() else { return }
+        items[i].healedURL = prev
+        loadMetadata(items[i].id, url: items[i].inputURL)
+        loadPreview()
+    }
 
     @Published var selectedID: QueueItem.ID? = nil { didSet { if selectedID != oldValue { loadPreview() } } }
     @Published var running = false
@@ -1644,7 +1835,7 @@ final class AppModel: ObservableObject {
     }
 
     private func settingsChanged() {
-        if settings.likeness > 0 && settings.mode == "detail" { prefetchOptional() }
+        if (settings.likeness > 0 && settings.mode == "detail") || settings.upscaler != "esrgan" { prefetchOptional() }
         guard !applyingPreset, let snap = presetSnapshot else { return }
         let s = settings
         let aiMoved = s.creativity != snap.creativity || s.resemblance != snap.resemblance || s.hdr != snap.hdr
@@ -1722,17 +1913,20 @@ final class AppModel: ObservableObject {
     /// Start fetching the chosen face model in the background as soon as Face Fix is switched on.
     private func prefetchFaceModel() { prefetchOptional() }
 
-    /// Optional models the current settings need (face model, Likeness) that aren't on disk yet.
-    private func missingOptional(face: Bool, faceKind: String, likeness: Double, mode: String) -> [ModelFile] {
+    /// Optional models the current settings need (face model, Likeness, a picked upscaler) that aren't on disk yet.
+    private func missingOptional(face: Bool, faceKind: String, likeness: Double, mode: String,
+                                 upscaler: String = "esrgan") -> [ModelFile] {
         var keys: [String] = []
         if face { keys.append(faceKind) }
         if likeness > 0 && mode == "detail" { keys += ["ip_plus", "clip_image_h"] }
+        if upscaler != "esrgan" { keys.append(upscaler) }
         return keys.compactMap { ModelStore.faceModel($0) }.filter { !ModelStore.isPresent($0) }
     }
 
     private func prefetchOptional() {
         guard engineReady else { return }
-        let files = missingOptional(face: faceFix, faceKind: faceModel, likeness: settings.likeness, mode: settings.mode)
+        let files = missingOptional(face: faceFix, faceKind: faceModel, likeness: settings.likeness, mode: settings.mode,
+                                    upscaler: settings.upscaler)
         if !files.isEmpty { ensureOptional(files) { _ in } }
     }
 
@@ -1740,7 +1934,8 @@ final class AppModel: ObservableObject {
         let need = files.filter { !ModelStore.isPresent($0) }
         if need.isEmpty { done(nil); return }
         faceWaiters.append(done)
-        guard !downloader.isRunning else { return }
+        for f in need where !optionalWanted.contains(where: { $0.key == f.key }) { optionalWanted.append(f) }
+        guard !downloader.isRunning else { return }   // picked up when the running download finishes
         downloader.onProgress = { [weak self] msg, frac, eta in
             guard let self else { return }
             self.engineStatus = msg
@@ -1751,6 +1946,10 @@ final class AppModel: ObservableObject {
         }
         downloader.onFinish = { [weak self] err in
             guard let self else { return }
+            // Add-ons asked for while this download ran: fetch them too before reporting back.
+            let still = self.optionalWanted.filter { !ModelStore.isPresent($0) }
+            if err == nil, !still.isEmpty { self.downloader.start(still); return }
+            self.optionalWanted = []
             self.engineFraction = nil
             self.engineStatus = self.engineReady ? "Ready" : self.engineStatus
             let waiters = self.faceWaiters
@@ -1816,6 +2015,11 @@ final class AppModel: ObservableObject {
     private func engineExited(_ code: Int32) {
         engineReady = false
         engineFraction = nil
+        if healID != nil {
+            healID = nil
+            healBusy = false
+            errorMessage = "Remove stopped with the engine (code \(code)). Try again once it has restarted."
+        }
         if let idx = index(of: jobItemID) {
             items[idx].state = .failed("Engine stopped (code \(code)) — likely out of memory. Try a smaller max size or the 8 GB profile.")
             items[idx].fraction = nil
@@ -1971,7 +2175,7 @@ final class AppModel: ObservableObject {
         let item = items[i]
         let job = item.job ?? snapshot(label: "")
         let needed = missingOptional(face: job.faceFix, faceKind: job.faceModel, likeness: job.settings.likeness,
-                                     mode: job.settings.mode)
+                                     mode: job.settings.mode, upscaler: job.settings.upscaler)
         if !needed.isEmpty {
             let itemID = item.id
             items[i].message = "Downloading an add-on model (first use only)…"
@@ -1982,7 +2186,7 @@ final class AppModel: ObservableObject {
                         self.items[j].state = .failed("Couldn't download an add-on model: " + err)
                         self.items[j].message = ""
                     }
-                    self.errorMessage = "Couldn't download an add-on model (Face Fix or Likeness): " + err
+                    self.errorMessage = "Couldn't download an add-on model (Face Fix, Likeness, an upscaler or Remove): " + err
                 }
                 self.pump()
             }
@@ -2010,8 +2214,8 @@ final class AppModel: ObservableObject {
         // Security: the user's file is decoded only by macOS (ImageIO, kept patched by system updates) and
         // handed to the engine as a fresh sRGB PNG, so the bundled Python image libraries never parse
         // untrusted files. ≤3072 px is plenty: the engine works at ≤768 px on the short side.
-        let f = filters, src = item.url, itemID = item.id
-        let strokes = job.settings.mode == "detail" ? item.protectStrokes : []
+        let f = filters, src = item.inputURL, itemID = item.id
+        let strokes = job.settings.mode == "detail" ? item.protectStrokes : [], inverted = item.protectInverted
         DispatchQueue.global(qos: .userInitiated).async {
             var input: String?
             var maskPath: String?
@@ -2021,7 +2225,7 @@ final class AppModel: ObservableObject {
                 if face != nil || detail != nil || job.settings.protectActive { faces = FaceFinder.landmarks(clean) }
                 let tmp = Self.tempDir.appendingPathComponent("input-\(UUID().uuidString.prefix(8)).png")
                 if (try? DetailFilterEngine.write(clean, to: tmp, type: .png)) != nil { input = tmp.path }
-                if let m = ProtectMask.render(strokes, width: clean.width, height: clean.height) {
+                if let m = ProtectMask.render(strokes, width: clean.width, height: clean.height, inverted: inverted) {
                     let mp = Self.tempDir.appendingPathComponent("protect-\(UUID().uuidString.prefix(8)).png")
                     if (try? DetailFilterEngine.write(m, to: mp, type: .png)) != nil { maskPath = mp.path }
                 }
@@ -2107,6 +2311,11 @@ final class AppModel: ObservableObject {
             return
         }
 
+        if id != nil, id == healID {
+            healFinished(msg)
+            return
+        }
+
         guard id != nil, id == jobID, let i = index(of: jobItemID) else {
             if event == "error", id == nil { errorMessage = msg["message"] as? String }
             return
@@ -2175,7 +2384,7 @@ final class AppModel: ObservableObject {
         zoomScale = nil
         zoomPan = .zero
         guard let item = selected else { return }
-        let inURL = item.url, outURL = item.outputURL, id = item.id
+        let inURL = item.inputURL, outURL = item.outputURL, id = item.id
         DispatchQueue.global(qos: .userInitiated).async {
             // Up to 4096 px so zooming to 100% shows real detail (enhanced results are usually smaller,
             // i.e. shown at full resolution).
@@ -2420,14 +2629,16 @@ final class AppModel: ObservableObject {
     /// Short name for the current settings: the lit preset, else a summary of the knobs.
     var settingsLabel: String {
         if let u = userPresets.first(where: { userPresetMatches($0) }) { return u.name }
+        let up = settings.upscaler == "esrgan" ? "" : " " + (Upscaler.find(settings.upscaler)?.key.lowercased() ?? "")
         if let p = activePreset {
-            return p + (settings.likeness > 0 ? " +likeness" : "") + (settings.faceDetailActive ? " +detail" : "")
+            return p + up + (settings.likeness > 0 ? " +likeness" : "") + (settings.faceDetailActive ? " +detail" : "")
                 + (settings.protectActive ? " +protect" : "")
                 + (faceFix ? " +face" : "") + (settings.keepTones ? "" : " -tones")
         }
         let s = settings
-        if s.mode == "instant" { return "INSTANT" }
+        if s.mode == "instant" { return "INSTANT" + up }
         var parts = [String(format: "C%.2f R%.2f", s.creativity, s.resemblance)]
+        if !up.isEmpty { parts.append(String(up.dropFirst())) }
         if s.turbo { parts.append("turbo") }
         if s.likeness > 0 { parts.append(String(format: "L%.0f%%", s.likeness * 100)) }
         if s.protectActive { parts.append("protect") }
@@ -2454,6 +2665,8 @@ final class AppModel: ObservableObject {
         row.inputSize = src.inputSize
         row.job = snapshot(label: settingsLabel)
         row.protectStrokes = src.protectStrokes   // the same painted areas for each version
+        row.protectInverted = src.protectInverted
+        row.healedURL = src.healedURL             // and the same spots removed
         items.append(row)
         if running { runTotal += 1 }
         if src.inputSize == .zero { loadMetadata(row.id, url: row.url) }
@@ -3569,6 +3782,7 @@ enum Guide: Equatable {
     case faceFix, faceModel, faceStrength, faceFidelity, zoom, likeness, myPresets, addQueue, autoSave
     case keepTones, faceDetail, faceDetailStrength, faceDetailHair, protectFaces, paintProtect
     case presence, mixer, grading, glow, blurFilter, skin
+    case upscaler, protectInvert, removeSpots, updates
 
     var title: String {
         switch self {
@@ -3628,6 +3842,10 @@ enum Guide: Equatable {
         case .glow: return "Glamour Glow"
         case .blurFilter: return "Blur"
         case .skin: return "Skin Texture"
+        case .upscaler: return "Upscaler"
+        case .protectInvert: return "Protect · Invert"
+        case .removeSpots: return "Remove Spots"
+        case .updates: return "Updates"
         }
     }
 
@@ -3652,7 +3870,7 @@ enum Guide: Equatable {
         case .maxSize:
             return "Caps the long side of the result. Smaller is much faster and uses less memory: 768 px is quickest, ∞ means no cap (slow on 8 GB). Click to step through."
         case .memory:
-            return "8 GB keeps everything safe for your Mac by working in smaller pieces. 16 GB+ uses the original web app's larger pieces: faster on big Macs, but it may crash on 8 GB."
+            return "8 GB keeps everything safe for your Mac by working in smaller pieces. 16 GB+ works in larger pieces, tuned to this Mac's real memory like Protoart Studio: Macs with 16–23 GB keep some memory-saving on, 24 GB and more run the fastest settings. It may crash on 8 GB."
         case .batch:
             return "Off: one image at a time. On: a queue appears on the left. Drop many images or folders and they're enhanced one after another, saved automatically."
         case .format:
@@ -3729,6 +3947,14 @@ enum Guide: Equatable {
             return "Like Protoart Studio's Protect from Enhance, found automatically: faces are kept out of the AI re-detailing so they stay exactly the person. Face Fix (CodeFormer or RestoreFormer) runs first on a clean upscale of your photo, then the AI adds detail to everything else and the faces are blended back in softly. With Face Fix off, faces come from the clean upscale alone. Face Detail is off while this is on. Not needed for INSTANT."
         case .paintProtect:
             return "Like Protoart Studio's Protect from Enhance: click PAINT AREAS and mark anything the AI shouldn't re-detail (text, a logo, a pattern, hands, a face you want exactly as it is). Marked areas keep the photo as it is, cleanly upscaled; everything else gets the AI detail. Tools beside the picture: Brush (B), Erase (E), Lasso (L), Polygon (P), Wand (W), Subject (S) and Text (T), then Undo (⌘Z), Clear and Done (Esc). Each photo keeps its own marks, and + QUEUE copies them. Works with or without Protect Faces."
+        case .upscaler:
+            return "The 4× upscaler that sharpens your photo first: on its own in INSTANT, or before the AI adds detail. ULTRASHARP is built in. The others (from Protoart Studio) download the first time you pick one: ULTRA V2 is the best and slowest, V2 LITE most of its quality and fast, WEB PHOTO cleans phone and web photos (noise, blur, JPEG), NATURAL keeps a natural look, REAL-ESRGAN suits general pictures, QUICK is tiny and fast, ANIME and ANIME 6B are for drawings. The UltraSharp and AnimeSharp models are non-commercial."
+        case .protectInvert:
+            return "Like Protoart Studio's ⇄ Invert: protects everything except the areas you painted, so you can mark just the part the AI should re-detail. Press again to switch back. Your marks stay as they are."
+        case .removeSpots:
+            return "Like Protoart Studio's 🩹 Remove: click PAINT SPOTS and paint over scratches, dust, blemishes, wires or anything in the way (the Wand, Subject and Text tools work too), then HEAL. LaMa fills them in from their surroundings in a few seconds. The healed photo becomes this photo's Before and is what gets enhanced; your original file is never changed. UNDO steps back. LaMa downloads once (195 MB)."
+        case .updates:
+            return "Checks GitHub for a newer ProtoArt Beautify, only when you ask or once a day if you said yes. Nothing else is sent. A download is checked against its published SHA-256 before it's installed."
         case .faceDetailHair:
             return "Off: only the face (forehead to chin) is redrawn. On: the hair above and beside the face is redrawn too, for portraits where the hair looks soft."
         case .presence:
@@ -3986,9 +4212,34 @@ struct ControlsPanel: View {
                     }
                     .frame(maxWidth: .infinity)
                     ToggleSwitch(label: "Memory", off: "8 GB", on: "16 GB+", isOn: memory16,
-                                 help: "8 GB: 512 px input cap and 512 px tiles. 16 GB+: the Space's original settings.")
+                                 help: "8 GB: 512 px input cap and 512 px tiles. 16 GB+: bigger tiles, tuned to this Mac's real memory (16 GB or 24 GB+).")
                         .guide(.memory)
                         .frame(maxWidth: .infinity)
+                }
+
+                Module(title: "Upscaler") {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: 3), spacing: 6) {
+                        ForEach(Upscaler.all) { u in
+                            Button { model.settings.upscaler = u.id } label: {
+                                Text(u.key).font(Console.label(10)).tracking(0.4)
+                                    .lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(PresetKeyStyle(lit: model.settings.upscaler == u.id))
+                            .help("\(u.name): \(u.note)" + (u.nonCommercial ? " · non-commercial licence" : ""))
+                        }
+                    }
+                    .guide(.upscaler)
+                    let u = Upscaler.find(model.settings.upscaler) ?? Upscaler.all[0]
+                    HStack {
+                        EngravedLabel("\(u.name) · \(u.note)" + (u.nonCommercial ? " · non-commercial" : "")
+                                      + (u.id != "esrgan" && !model.upscalerReady(u.id) ? " · downloads when used" : ""),
+                                      size: 10)
+                            .lineLimit(2).minimumScaleFactor(0.8)
+                        Spacer(minLength: 0)
+                    }
+                    EngravedLabel(model.settings.mode == "instant" ? "INSTANT: this upscaler alone"
+                                  : "Sharpens before the AI adds detail", size: 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 Module(title: "Save") {
@@ -4108,13 +4359,19 @@ struct ControlsPanel: View {
                         Spacer(minLength: 0)
                     }
                     HStack(spacing: 8) {
-                        Button(model.painting ? "DONE" : "PAINT AREAS") { model.togglePainting() }
-                            .buttonStyle(PresetKeyStyle(lit: model.painting)).fixedSize()
+                        let on = model.painting && !model.healing
+                        Button(on ? "DONE" : "PAINT AREAS") { model.togglePainting("protect") }
+                            .buttonStyle(PresetKeyStyle(lit: on)).fixedSize()
                             .help("Paint parts of the photo to keep out of the AI re-detailing (any area, not just faces)")
                             .guide(.paintProtect)
-                        Button("CLEAR") { model.clearStrokes() }
+                        Button("⇄ INVERT") { model.invertProtect() }
+                            .buttonStyle(PresetKeyStyle(lit: model.protectInverted)).fixedSize()
+                            .disabled(model.selected?.protectPainted != true)
+                            .help("Protect everything except the painted areas (press again to switch back)")
+                            .guide(.protectInvert)
+                        Button("CLEAR") { model.clearProtect() }
                             .buttonStyle(MetalButtonStyle()).fixedSize()
-                            .disabled(model.selectedStrokes.isEmpty)
+                            .disabled(model.selected?.protectStrokes.isEmpty ?? true)
                             .help("Remove the painted areas from this photo")
                         Spacer(minLength: 0)
                     }
@@ -4122,8 +4379,38 @@ struct ControlsPanel: View {
                         EngravedLabel(model.selected == nil ? "Open a photo to paint"
                                       : model.selected?.protectPainted == true
                                         ? (model.settings.mode == "instant" ? "Painted · not needed for INSTANT"
-                                                                             : "Painted areas protected on this photo")
+                                           : model.protectInverted ? "Inverted · everything except the painted areas is protected"
+                                                                   : "Painted areas protected on this photo")
                                         : "Nothing painted on this photo", size: 10)
+                            .lineLimit(2).minimumScaleFactor(0.8)
+                        Spacer(minLength: 0)
+                    }
+                }
+
+                Module(title: "Remove") {
+                    HStack(spacing: 8) {
+                        let on = model.painting && model.healing
+                        Button(on ? "DONE" : "PAINT SPOTS") { model.togglePainting("heal") }
+                            .buttonStyle(PresetKeyStyle(lit: on)).fixedSize()
+                            .help("Paint over scratches, dust, blemishes or anything in the way")
+                            .guide(.removeSpots)
+                        Button(model.healBusy ? "WORKING…" : "HEAL") { model.applyHeal() }
+                            .buttonStyle(MetalButtonStyle()).fixedSize()
+                            .disabled(!model.healPainted || model.healBusy)
+                            .help("Fill the painted spots in from their surroundings")
+                            .guide(.removeSpots)
+                        Button("UNDO") { model.undoHeal() }
+                            .buttonStyle(MetalButtonStyle()).fixedSize()
+                            .disabled(!model.canUndoHeal || model.healBusy)
+                            .help("Go back to the photo before the last HEAL")
+                        Spacer(minLength: 0)
+                    }
+                    HStack {
+                        EngravedLabel(model.selected == nil ? "Open a photo to paint"
+                                      : model.healBusy ? "Removing the painted spots…"
+                                      : model.healPainted ? "Painted · press HEAL"
+                                      : model.canUndoHeal ? "Spots removed · the original file is untouched"
+                                      : "LaMa · 195 MB on first use", size: 10)
                             .lineLimit(2).minimumScaleFactor(0.8)
                         Spacer(minLength: 0)
                     }
@@ -5039,6 +5326,17 @@ enum PaintTool: String, CaseIterable, Identifiable {
         case .text: return "Finds the writing (signs, logos, captions)"
         }
     }
+    var healHint: String {
+        switch self {
+        case .brush: return "Paint over the spots to remove, then HEAL"
+        case .erase: return "Rub out paint you don't want removed"
+        case .lasso: return "Draw around something to remove; it fills when you let go"
+        case .poly: return "Click the corners of what to remove; click the first point or double-click to close"
+        case .wand: return "Click a colour to pick the connected area to remove"
+        case .subject: return "Finds the people, animals or main thing (to remove)"
+        case .text: return "Finds the writing to remove (signs, captions, watermarks)"
+        }
+    }
     var tip: String { "\(label) (\(String(key.character).uppercased())): \(hint)" }
 }
 
@@ -5060,8 +5358,8 @@ struct PaintCanvas: View {
         CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)
     }
 
-    private func draw(_ st: ProtectStroke, in layer: inout GraphicsContext, _ r: CGRect) {
-        layer.blendMode = st.erase ? .clear : .normal
+    private func draw(_ st: ProtectStroke, in layer: inout GraphicsContext, _ r: CGRect, inverted: Bool = false) {
+        layer.blendMode = st.erase != inverted ? .clear : .normal
         let pts = st.points.map { CGPoint(x: r.minX + $0.x * r.width, y: r.minY + $0.y * r.height) }
         switch st.kind {
         case "bitmap":
@@ -5093,11 +5391,15 @@ struct PaintCanvas: View {
                 Image(nsImage: image).resizable().interpolation(.high)
                     .frame(width: r.width, height: r.height).position(x: r.midX, y: r.midY)
                 Canvas { ctx, _ in
+                    // Protect ⇄ inverted: everything is red except the painted areas
+                    let inv = !model.healing && model.protectInverted
                     ctx.drawLayer { layer in
-                        for st in model.selectedStrokes { draw(st, in: &layer, r) }
-                        if let c = current { draw(c, in: &layer, r) }
+                        if inv { layer.fill(Path(r), with: .color(.red)) }
+                        for st in model.selectedStrokes { draw(st, in: &layer, r, inverted: inv) }
+                        if let c = current { draw(c, in: &layer, r, inverted: inv) }
                     }
                 }
+                .colorMultiply(model.healing ? Color(red: 0.2, green: 0.9, blue: 1) : .white)  // Remove marks are cyan
                 .opacity(0.45)
                 .allowsHitTesting(false)
                 // polygon in progress / lasso outline
@@ -5119,8 +5421,8 @@ struct PaintCanvas: View {
                         .overlay(Circle().stroke(tool == .erase ? Color.cyan : Color.white, lineWidth: 1.5))
                         .frame(width: d, height: d).position(h).allowsHitTesting(false)
                 }
-                if model.paintBusy {
-                    Text("FINDING…").font(Console.mono(12)).foregroundStyle(Console.amber)
+                if model.paintBusy || model.healBusy {
+                    Text(model.healBusy ? "REMOVING…" : "FINDING…").font(Console.mono(12)).foregroundStyle(Console.amber)
                         .padding(8).background(Color.black.opacity(0.7)).position(x: r.midX, y: r.midY)
                 }
             }
@@ -5208,7 +5510,9 @@ struct PaintToolColumn: View {
                     .buttonStyle(.plain).help("Remove everything marked on this photo")
                     .disabled(model.selectedStrokes.isEmpty)
                 Button { model.painting = false } label: { cell("checkmark", "Done", lit: true) }
-                    .buttonStyle(.plain).keyboardShortcut(.escape, modifiers: []).help("Stop painting (Esc). The marked areas stay protected for this photo.")
+                    .buttonStyle(.plain).keyboardShortcut(.escape, modifiers: [])
+                    .help(model.healing ? "Stop painting (Esc). The painted spots stay marked until you press HEAL."
+                                        : "Stop painting (Esc). The marked areas stay protected for this photo.")
             }
             .padding(.vertical, 2)
         }
@@ -5221,8 +5525,10 @@ struct PaintOptionsBar: View {
     @EnvironmentObject var model: AppModel
     var body: some View {
         let t = model.paintTool
+        let hint = model.healing ? t.healHint : t.hint
         HStack(spacing: 10) {
-            Text(t.label.uppercased()).font(Console.mono(11)).foregroundStyle(Console.amber).fixedSize()
+            Text((model.healing ? "REMOVE · " : "PROTECT · ") + t.label.uppercased())
+                .font(Console.mono(11)).foregroundStyle(Console.amber).fixedSize()
             if t == .brush || t == .erase {
                 Text("SIZE").font(Console.mono(10)).foregroundStyle(Color(white: 0.7)).fixedSize()
                 Slider(value: $model.brushSize, in: 0.005...0.15).frame(minWidth: 70, maxWidth: 140)
@@ -5244,7 +5550,8 @@ struct PaintOptionsBar: View {
                                     .fill(model.brushErase == item.1 ? Console.amber : Color(white: 0.18)))
                         }
                         .buttonStyle(.plain)
-                        .help(item.1 ? "Take away from the protected area" : "Add to the protected area")
+                        .help(model.healing ? (item.1 ? "Take away from the spots to remove" : "Add to the spots to remove")
+                                            : (item.1 ? "Take away from the protected area" : "Add to the protected area"))
                     }
                 }
                 .fixedSize()
@@ -5254,11 +5561,22 @@ struct PaintOptionsBar: View {
                     .buttonStyle(MetalButtonStyle()).fixedSize()
                     .disabled(model.paintBusy)
             }
-            Text(model.paintNote ?? t.hint).font(.system(size: 11))
+            Text(model.paintNote ?? hint).font(.system(size: 11))
                 .foregroundStyle(model.paintNote == nil ? Color(white: 0.75) : Console.amber)
                 .lineLimit(1).truncationMode(.tail).layoutPriority(-1)
-                .help(model.paintNote ?? t.hint)
+                .help(model.paintNote ?? hint)
             Spacer(minLength: 0)
+            if model.healing {
+                Button(model.healBusy ? "WORKING…" : "HEAL") { model.applyHeal() }
+                    .buttonStyle(MetalButtonStyle()).fixedSize()
+                    .disabled(!model.healPainted || model.healBusy)
+                    .keyboardShortcut(.return, modifiers: [])
+                    .help("Fill the painted spots in from their surroundings (Return)")
+                Button("UNDO HEAL") { model.undoHeal() }
+                    .buttonStyle(MetalButtonStyle()).fixedSize()
+                    .disabled(!model.canUndoHeal || model.healBusy)
+                    .help("Go back to the photo before the last HEAL")
+            }
         }
         .padding(.horizontal, 10).frame(height: 32)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.55)))
@@ -5785,6 +6103,67 @@ enum HelpContent {
 
 /// `ProtoArt Beautify --selftest-filters <report.txt>`: renders every Adjust step on a test picture and writes
 /// whether its kernel compiled, how much it changed the picture and how long it took (preview and full size).
+/// `--selftest-features <report>`: checks the update checker's rules and the Protect / Remove masks without a window.
+enum FeatureSelfTest {
+    static func run(report path: String) {
+        var lines = ["ProtoArt Beautify feature self-test"], fails = 0
+        func check(_ name: String, _ ok: Bool) { lines.append("\(ok ? "ok  " : "FAIL") \(name)"); if !ok { fails += 1 } }
+        // version order
+        check("1.3.10 newer than 1.3.9", Updater.newer("1.3.10", than: "1.3.9"))
+        check("v1.4 newer than 1.3.3", Updater.newer("v1.4", than: "1.3.3"))
+        check("1.3.3 not newer than 1.3.3", !Updater.newer("1.3.3", than: "1.3.3"))
+        check("1.3.2 not newer than 1.3.3", !Updater.newer("1.3.2", than: "1.3.3"))
+        // the right installer for each Mac
+        let names = ["ProtoArt-Beautify-1.4.0.dmg", "ProtoArt-Beautify-1.4.0.dmg.sha256",
+                     "ProtoArt-Beautify-1.4.0-Intel.dmg", "ProtoArt-Beautify-1.4.0-Intel.dmg.sha256"]
+        check("Apple Silicon gets the arm DMG", Updater.pickDMG(names, intel: false) == "ProtoArt-Beautify-1.4.0.dmg")
+        check("Intel gets the Intel DMG", Updater.pickDMG(names, intel: true) == "ProtoArt-Beautify-1.4.0-Intel.dmg")
+        func release(_ assets: [(String, String)], tag: String = "v1.4.0") -> Data {
+            let a = assets.map { ["name": $0.0, "browser_download_url": $0.1, "size": 100] as [String: Any] }
+            return try! JSONSerialization.data(withJSONObject: ["tag_name": tag, "name": "x", "body": "notes",
+                "html_url": "https://github.com/\(Updater.repo)/releases/tag/\(tag)", "assets": a])
+        }
+        let base = Updater.assetPrefix + "v1.4.0/"
+        let good = release(names.map { ($0, base + $0) })
+        if case .available(let r) = Updater.parse(good, intel: false, current: "1.3.3") {
+            check("newer release found", r.version == "1.4.0" && r.dmg.lastPathComponent == "ProtoArt-Beautify-1.4.0.dmg"
+                  && r.sha.lastPathComponent == "ProtoArt-Beautify-1.4.0.dmg.sha256")
+        } else { check("newer release found", false) }
+        if case .upToDate = Updater.parse(good, intel: false, current: "1.4.0") { check("same version: up to date", true) }
+        else { check("same version: up to date", false) }
+        let noSum = release(names.filter { !$0.hasSuffix(".sha256") }.map { ($0, base + $0) })
+        if case .failed = Updater.parse(noSum, intel: false, current: "1.3.3") { check("no checksum: refused", true) }
+        else { check("no checksum: refused", false) }
+        let elsewhere = release(names.map { ($0, "https://example.com/" + $0) })
+        if case .failed = Updater.parse(elsewhere, intel: false, current: "1.3.3") { check("download from another site: refused", true) }
+        else { check("download from another site: refused", false) }
+        let otherRepo = release(names.map { ($0, "https://github.com/someone/else/releases/download/v1.4.0/" + $0) })
+        if case .failed = Updater.parse(otherRepo, intel: false, current: "1.3.3") { check("another repository: refused", true) }
+        else { check("another repository: refused", false) }
+        // ⇄ Invert: a square painted in the middle of a 100 x 100 picture
+        let sq = ProtectStroke(points: [CGPoint(x: 0.4, y: 0.4), CGPoint(x: 0.6, y: 0.4), CGPoint(x: 0.6, y: 0.6), CGPoint(x: 0.4, y: 0.6)],
+                               radius: 0, erase: false, kind: "fill")
+        func px(_ cg: CGImage?, _ x: Int, _ y: Int) -> UInt8 {
+            guard let cg, let d = cg.dataProvider?.data, let b = CFDataGetBytePtr(d) else { return 128 }
+            return b[y * cg.bytesPerRow + x]
+        }
+        let plain = ProtectMask.render([sq], width: 100, height: 100)
+        let inv = ProtectMask.render([sq], width: 100, height: 100, inverted: true)
+        check("painted area protected", px(plain, 50, 50) == 255 && px(plain, 5, 5) == 0)
+        check("inverted: everything else protected", px(inv, 50, 50) == 0 && px(inv, 5, 5) == 255)
+        let erased = ProtectMask.render([sq, ProtectStroke(points: [CGPoint(x: 0.5, y: 0.5)], radius: 0.05, erase: true)],
+                                        width: 100, height: 100, inverted: true)
+        check("inverted + erase puts protection back", px(erased, 50, 50) == 255 && px(erased, 42, 42) == 0)
+        check("nothing painted: no mask", ProtectMask.render([], width: 100, height: 100, inverted: true) == nil)
+        // the upscaler list and the model list agree
+        check("every upscaler has a pinned download", Upscaler.all.allSatisfy { u in
+            u.id == "esrgan" || (ModelStore.faceModel(u.id) != nil && ModelStore.pinnedSHA256[u.id] != nil) })
+        check("Remove model pinned", ModelStore.faceModel("lama") != nil && ModelStore.pinnedSHA256["lama"] != nil)
+        lines.append(fails == 0 ? "ALL PASSED" : "\(fails) FAILED")
+        try? lines.joined(separator: "\n").write(toFile: path, atomically: true, encoding: .utf8)
+    }
+}
+
 enum FilterSelfTest {
     static func run(report path: String) {
         var lines = ["ProtoArt Beautify filter self-test"]
@@ -5851,10 +6230,341 @@ enum FilterSelfTest {
     }
 }
 
+// MARK: - 🎁 Updates (ported from Protoart Studio's Settings → Updates)
+
+/// Only when you ask (ProtoArt Beautify → Check for Updates…) or, if you said yes once, at most once a day. It asks
+/// GitHub for this project's latest release and nothing else: no ids, no stats. The installer must match the .sha256
+/// file published beside it; then the app swaps itself for the new one (when it can write there) and reopens.
+@MainActor
+final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
+    struct Release: Equatable { let version: String, name: String, notes: String, page: URL, dmg: URL, sha: URL, size: Int }
+    enum State: Equatable {
+        case idle, checking, upToDate(String), available(Release), downloading(Double), ready(Release, URL)
+        case failed(String)
+    }
+
+    nonisolated static let repo = "theprotoart/protoart-beautify"
+    nonisolated static let assetPrefix = "https://github.com/\(repo)/releases/download/"
+    @Published var state: State = .idle
+    @Published var show = false
+    @Published var askDaily = false            // the one-time question: check once a day?
+    private let d = UserDefaults.standard
+    private var session: URLSession?
+    private var pending: (Release, String)?    // release + expected SHA-256 while downloading
+    private var didLaunch = false
+
+    static var current: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0" }
+    nonisolated static var dir: URL { ModelStore.root.appendingPathComponent("updates", isDirectory: true) }
+
+    /// a newer than b ("1.3.10" > "1.3.9")
+    nonisolated static func newer(_ a: String, than b: String) -> Bool {
+        func n(_ v: String) -> [Int] { v.trimmingCharacters(in: CharacterSet(charactersIn: "vV")).split(separator: ".").map { Int($0) ?? 0 } }
+        let x = n(a), y = n(b)
+        for i in 0..<max(x.count, y.count) {
+            let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0
+            if p != q { return p > q }
+        }
+        return false
+    }
+
+    /// This Mac's installer in a release: the Intel build runs only on Intel Macs, the other one on Apple Silicon.
+    nonisolated static func pickDMG(_ names: [String], intel: Bool) -> String? {
+        names.first { $0.hasSuffix(".dmg") && ($0.hasSuffix("-Intel.dmg") == intel) }
+    }
+
+    /// At launch: ask the one-time question on the second launch (not during the first model download), and run the
+    /// daily check if you said yes.
+    func launched() {
+        guard !didLaunch else { return }
+        didLaunch = true
+        let launches = d.integer(forKey: "launchCount") + 1
+        d.set(launches, forKey: "launchCount")
+        if d.object(forKey: "updateDaily") == nil {
+            if launches >= 2 { askDaily = true; show = true }
+            return
+        }
+        guard d.bool(forKey: "updateDaily") else { return }
+        let last = d.object(forKey: "updateLastCheck") as? Date ?? .distantPast
+        if Date().timeIntervalSince(last) > 20 * 3600 { check(quiet: true) }
+    }
+
+    func answerDaily(_ yes: Bool) {
+        d.set(yes, forKey: "updateDaily")
+        askDaily = false
+        if yes { check(quiet: false) } else { show = false }
+    }
+    var daily: Bool {
+        get { d.bool(forKey: "updateDaily") }
+        set { d.set(newValue, forKey: "updateDaily"); objectWillChange.send() }
+    }
+
+    /// quiet: only show the window when there is something new.
+    func check(quiet: Bool = false) {
+        if case .downloading = state { show = true; return }
+        state = .checking
+        if !quiet { show = true }
+        var req = URLRequest(url: URL(string: "https://api.github.com/repos/\(Self.repo)/releases/latest")!)
+        req.setValue("ProtoArtBeautify/\(Self.current)", forHTTPHeaderField: "User-Agent")
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 20
+        URLSession.shared.dataTask(with: req) { data, resp, err in
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let result: State
+            if let err { result = .failed("Couldn't reach GitHub (\(err.localizedDescription)).") }
+            else if status != 200 { result = .failed("GitHub answered \(status).") }
+            else { result = Self.parse(data ?? Data()) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.d.set(Date(), forKey: "updateLastCheck")
+                    self.state = result
+                    if quiet, case .available = result { self.show = true }
+                }
+            }
+        }.resume()
+    }
+
+    nonisolated static func parse(_ data: Data, intel: Bool? = nil, current: String? = nil) -> State {
+        guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag = j["tag_name"] as? String else { return .failed("GitHub's answer couldn't be read.") }
+        let version = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        let mine = current ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0")
+        guard newer(version, than: mine) else { return .upToDate(mine) }
+        let assets = (j["assets"] as? [[String: Any]]) ?? []
+        let names = assets.compactMap { $0["name"] as? String }
+        #if arch(x86_64)
+        let isIntel = intel ?? true
+        #else
+        let isIntel = intel ?? false
+        #endif
+        func url(_ name: String) -> (URL, Int)? {
+            guard let a = assets.first(where: { $0["name"] as? String == name }),
+                  let s = a["browser_download_url"] as? String, s.hasPrefix(assetPrefix), let u = URL(string: s)
+            else { return nil }
+            return (u, a["size"] as? Int ?? 0)
+        }
+        guard let dmgName = pickDMG(names, intel: isIntel), let (dmg, size) = url(dmgName) else {
+            return .failed("Version \(version) has no installer for this Mac yet.")
+        }
+        guard let (sha, _) = url(dmgName + ".sha256") else {
+            return .failed("Version \(version) has no checksum file, so it can't be checked. Download it from the release page instead.")
+        }
+        let page = URL(string: (j["html_url"] as? String).flatMap { $0.hasPrefix("https://github.com/\(repo)/") ? $0 : nil }
+                       ?? "https://github.com/\(repo)/releases")!
+        return .available(Release(version: version, name: j["name"] as? String ?? version,
+                                  notes: String((j["body"] as? String ?? "").prefix(4000)), page: page,
+                                  dmg: dmg, sha: sha, size: size))
+    }
+
+    /// Download the installer and check it against its published SHA-256 before it can be installed.
+    func download(_ r: Release) {
+        state = .downloading(0)
+        var req = URLRequest(url: r.sha)
+        req.setValue("ProtoArtBeautify/\(Self.current)", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: req) { data, _, _ in
+            let want = String(decoding: data ?? Data(), as: UTF8.self)
+                .split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).first.map { String($0).lowercased() } ?? ""
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard want.count == 64, want.allSatisfy({ $0.isHexDigit }) else {
+                        self.state = .failed("The checksum file couldn't be read, so the download wasn't started.")
+                        return
+                    }
+                    let dest = Self.dir.appendingPathComponent(r.dmg.lastPathComponent)
+                    if FileManager.default.fileExists(atPath: dest.path), ModelStore.sha256(of: dest) == want {
+                        self.state = .ready(r, dest); return   // already here and checked
+                    }
+                    self.pending = (r, want)
+                    let s = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
+                    self.session = s
+                    s.downloadTask(with: r.dmg).resume()
+                }
+            }
+        }.resume()
+    }
+
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
+                                totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        MainActor.assumeIsolated {
+            let total = totalBytesExpectedToWrite > 0 ? Double(totalBytesExpectedToWrite) : Double(pending?.0.size ?? 0)
+            if total > 0 { state = .downloading(min(0.999, Double(totalBytesWritten) / total)) }
+        }
+    }
+
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // still on the main queue (delegateQueue), and the file must be moved before returning
+        MainActor.assumeIsolated {
+            guard let (r, want) = pending else { return }
+            let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
+            guard status == 200 else { state = .failed("The download didn't start (HTTP \(status))."); return }
+            let fm = FileManager.default
+            try? fm.createDirectory(at: Self.dir, withIntermediateDirectories: true)
+            let part = Self.dir.appendingPathComponent(r.dmg.lastPathComponent + ".part")
+            try? fm.removeItem(at: part)
+            do { try fm.moveItem(at: location, to: part) } catch { state = .failed("Couldn't keep the download."); return }
+            state = .downloading(1)
+            DispatchQueue.global(qos: .userInitiated).async {
+                let ok = ModelStore.sha256(of: part) == want
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        let dest = Self.dir.appendingPathComponent(r.dmg.lastPathComponent)
+                        if ok {
+                            try? fm.removeItem(at: dest)
+                            try? fm.moveItem(at: part, to: dest)
+                            self.state = .ready(r, dest)
+                        } else {
+                            try? fm.removeItem(at: part)
+                            self.state = .failed("The download didn't match its checksum, so it was thrown away. Try again.")
+                        }
+                        self.pending = nil
+                    }
+                }
+            }
+        }
+    }
+
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        MainActor.assumeIsolated {
+            if let error, pending != nil {
+                pending = nil
+                state = .failed("The download stopped: \(error.localizedDescription)")
+            }
+            session.finishTasksAndInvalidate()
+        }
+    }
+
+    /// Swap the app for the downloaded one and reopen it. If this copy can't be replaced (it runs from the disk image,
+    /// or there's no permission), the installer is opened instead so you can drag it into Applications.
+    func install(_ dmg: URL) {
+        let fm = FileManager.default
+        let target = Bundle.main.bundleURL.standardizedFileURL
+        guard dmg.standardizedFileURL.path.hasPrefix(Self.dir.standardizedFileURL.path), dmg.pathExtension == "dmg" else { return }
+        let parent = target.deletingLastPathComponent().path
+        let canReplace = target.pathExtension == "app" && !target.path.hasPrefix("/Volumes/")
+            && fm.isWritableFile(atPath: parent) && fm.isWritableFile(atPath: target.path)
+        guard canReplace else { NSWorkspace.shared.open(dmg); show = false; return }
+        func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let mnt = Self.dir.appendingPathComponent("mnt").path
+        let t = target.path, pid = ProcessInfo.processInfo.processIdentifier
+        let script = [
+            "#!/bin/bash", "set -e",
+            // if anything fails, the app opens again as it was (it is never left missing)
+            "trap 'hdiutil detach \(q(mnt)) -force >/dev/null 2>&1; [ -d \(q(t)) ] && open \(q(t))' ERR",
+            "while kill -0 \(pid) 2>/dev/null; do sleep 0.5; done",
+            "mkdir -p \(q(mnt)); hdiutil detach \(q(mnt)) -force >/dev/null 2>&1 || true",
+            "hdiutil attach -nobrowse -readonly -noautoopen -mountpoint \(q(mnt)) \(q(dmg.path)) >/dev/null",
+            "NEW=\"$(find \(q(mnt)) -maxdepth 1 -name '*.app' -type d | head -1)\"",
+            "[ -n \"$NEW\" ] || { hdiutil detach \(q(mnt)) -force; open \(q(dmg.path)); exit 1; }",
+            "rm -rf \(q(t + ".updating"))",
+            "ditto \"$NEW\" \(q(t + ".updating"))",
+            "hdiutil detach \(q(mnt)) -force >/dev/null 2>&1 || true",
+            "xattr -dr com.apple.quarantine \(q(t + ".updating")) 2>/dev/null || true",
+            "rm -rf \(q(t + ".old"))",
+            "if mv \(q(t)) \(q(t + ".old")); then",
+            "  if mv \(q(t + ".updating")) \(q(t)); then rm -rf \(q(t + ".old")); else mv \(q(t + ".old")) \(q(t)); fi",
+            "fi",
+            "open \(q(t))",
+        ].joined(separator: "\n") + "\n"
+        let sh = Self.dir.appendingPathComponent("install.sh")
+        do {
+            try fm.createDirectory(at: Self.dir, withIntermediateDirectories: true)
+            try script.write(to: sh, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: sh.path)
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/bash")
+            p.arguments = [sh.path]
+            p.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": NSHomeDirectory()]
+            let log = Self.dir.appendingPathComponent("install.log")
+            fm.createFile(atPath: log.path, contents: nil)
+            if let h = try? FileHandle(forWritingTo: log) { p.standardOutput = h; p.standardError = h }
+            try p.run()
+        } catch {
+            state = .failed("Couldn't start the installer (\(error.localizedDescription)). Open the downloaded file instead.")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.terminate(nil) }
+    }
+}
+
+struct UpdateSheet: View {
+    @ObservedObject var updater: Updater
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("UPDATES").font(Console.mono(14)).foregroundStyle(Console.amber)
+            if updater.askDaily {
+                Text("Check for a newer ProtoArt Beautify once a day?").font(.headline)
+                Text("It only asks GitHub for the latest version number. Nothing about you or your pictures is sent. You can change this any time in ProtoArt Beautify → Check for Updates….")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Spacer()
+                    Button("Not Now") { updater.answerDaily(false) }
+                    Button("Check Daily") { updater.answerDaily(true) }.keyboardShortcut(.defaultAction)
+                }
+            } else {
+                content
+                Toggle("Check once a day", isOn: Binding(get: { updater.daily }, set: { updater.daily = $0 }))
+                    .font(.callout)
+            }
+        }
+        .padding(22)
+        .frame(width: 460)
+    }
+
+    @ViewBuilder private var content: some View {
+        switch updater.state {
+        case .idle, .checking:
+            HStack(spacing: 10) { ProgressView().controlSize(.small); Text("Checking GitHub…") }
+            closeRow
+        case .upToDate(let v):
+            Text("You have the latest version (\(v)).")
+            closeRow
+        case .available(let r):
+            Text("ProtoArt Beautify \(r.version) is available (you have \(Updater.current)).").font(.headline)
+            if !r.notes.isEmpty {
+                ScrollView { Text(r.notes).font(.callout).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
+                    .frame(maxHeight: 180)
+            }
+            HStack {
+                Button("Release Page") { NSWorkspace.shared.open(r.page) }
+                Spacer()
+                Button("Later") { dismiss() }
+                Button("Download") { updater.download(r) }.keyboardShortcut(.defaultAction)
+            }
+        case .downloading(let f):
+            ProgressView(value: f) { Text(f >= 1 ? "Checking the download…" : "Downloading… \(Int(f * 100))%") }
+            closeRow
+        case .ready(let r, let dmg):
+            Text("Version \(r.version) is downloaded and checked.").font(.headline)
+            Text("Install closes ProtoArt Beautify, puts the new version in its place and opens it again. Your settings and models stay.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Show Installer") { NSWorkspace.shared.activateFileViewerSelecting([dmg]) }
+                Spacer()
+                Button("Later") { dismiss() }
+                Button("Install and Reopen") { updater.install(dmg) }.keyboardShortcut(.defaultAction)
+            }
+        case .failed(let m):
+            Text(m).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Release Page") { NSWorkspace.shared.open(URL(string: "https://github.com/\(Updater.repo)/releases")!) }
+                Spacer()
+                Button("Try Again") { updater.check() }
+                Button("Close") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+
+    private var closeRow: some View {
+        HStack { Spacer(); Button("Close") { dismiss() }.keyboardShortcut(.defaultAction) }
+    }
+}
+
 @main
 struct ProtoArtBeautifyApp: App {
     @StateObject private var model = AppModel()
     @StateObject private var guides = GuideCenter()
+    @StateObject private var updater = Updater()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
@@ -5863,16 +6573,25 @@ struct ProtoArtBeautifyApp: App {
             FilterSelfTest.run(report: args[i + 1])
             exit(0)
         }
+        if let i = args.firstIndex(of: "--selftest-features"), i + 1 < args.count {
+            MainActor.assumeIsolated { FeatureSelfTest.run(report: args[i + 1]) }
+            exit(0)
+        }
     }
 
     var body: some Scene {
         Window("ProtoArt Beautify", id: "main") {
             ContentView().environmentObject(model).environmentObject(guides)
                 .onOpenURL { model.add([$0]) }
+                .sheet(isPresented: $updater.show) { UpdateSheet(updater: updater) }
+                .onAppear { updater.launched() }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1240, height: 740)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updater.check() }
+            }
             CommandGroup(replacing: .newItem) {
                 Button(model.batchMode ? "Add Images…" : "Open Image…") { model.openPanel() }
                     .keyboardShortcut("o")

@@ -33,6 +33,7 @@ class Remote:
     convert_fp16: bool  # safetensors we can shrink to fp16 on disk
     approx_mb: int
     optional: bool = False  # skipped (not downloaded here) if the app hasn't fetched it
+    url: str = ""           # set for files from a GitHub release: the exact address (repo/revision describe it)
 
 
 REMOTES: list[Remote] = [
@@ -68,6 +69,33 @@ REMOTES: list[Remote] = [
            "2516bc6c2cbd933e7949f7c2c0f076790ff3bf35", False, 94, optional=True),
     Remote("clip_image_h", "refiners/sd21.unclip.image_encoder", "model.safetensors",
            "4a36eec8c6fcfa9911a9b3290c707b8ad7591cc3", False, 1206, optional=True),
+    # Upscalers you can pick instead of 4x-UltraSharp (as in Protoart Studio's Instant), each downloaded the first
+    # time it's used from its author's own release. All 4x; spandrel reads every layout (DAT, RealPLKSR, ESRGAN,
+    # Real-ESRGAN), with .pth files through its restricted unpickler, and every file is hash-checked before each load.
+    Remote("up_ultrasharp_v2", "Kim2091/UltraSharpV2", "4x-UltraSharpV2.safetensors",
+           "2d1db39ff692c111da92112d49f833e4ad7035ae", False, 134, optional=True),
+    Remote("up_ultrasharp_v2_lite", "Kim2091/UltraSharpV2", "4x-UltraSharpV2_Lite.safetensors",
+           "2d1db39ff692c111da92112d49f833e4ad7035ae", False, 29, optional=True),
+    Remote("up_nomos_webphoto", "github:Phhofm/models", "4xNomosWebPhoto_RealPLKSR.safetensors",
+           "4xNomosWebPhoto_RealPLKSR", False, 29, optional=True,
+           url="https://github.com/Phhofm/models/releases/download/4xNomosWebPhoto_RealPLKSR/"
+               "4xNomosWebPhoto_RealPLKSR.safetensors"),
+    Remote("up_nomos8ksc", "github:Phhofm/models", "4xNomos8kSC.pth", "4xNomos8kSC", False, 64, optional=True,
+           url="https://github.com/Phhofm/models/releases/download/4xNomos8kSC/4xNomos8kSC.pth"),
+    Remote("up_realesrgan_x4plus", "github:xinntao/Real-ESRGAN", "RealESRGAN_x4plus.pth", "v0.1.0", False, 64,
+           optional=True, url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"),
+    Remote("up_realesr_general_x4v3", "github:xinntao/Real-ESRGAN", "realesr-general-x4v3.pth", "v0.2.5.0", False, 5,
+           optional=True,
+           url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth"),
+    Remote("up_animesharp", "Kim2091/AnimeSharp", "4x-AnimeSharp.safetensors",
+           "7696d95ced82b0c1f2a41f6ac73336133f0a90e1", False, 32, optional=True),
+    Remote("up_realesrgan_anime6b", "github:xinntao/Real-ESRGAN", "RealESRGAN_x4plus_anime_6B.pth", "v0.2.2.4", False,
+           18, optional=True,
+           url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"),
+    # Remove spots (LaMa, advimman/lama, Apache-2.0): the big-lama generator as safetensors (data only, never code),
+    # read by spandrel. Downloaded the first time Remove is used.
+    Remote("lama", "michaelgold/big-lama", "big-lama.safetensors",
+           "98ab7cface89a594b381f32fc7a9f2cae3f91ccc", False, 195, optional=True),
 ]
 
 
@@ -89,7 +117,25 @@ PINNED_SHA256 = {
     "codeformer": "1009e537e0c2a07d4cabce6355f53cb66767cd4b4297ec7a4a64ca4b8a5684b7",
     "ip_plus": "6eae5d2098fa83e3b8bf416fb46dd77a921ad044650f13890e8d41d7c84a71d2",
     "clip_image_h": "c9f43e359e06f1a237324c4c11734d6acd7fbddbfd3b1ed4f1b525267bedb812",
+    "up_ultrasharp_v2": "2b5db674aa8f3864a696dccd1d07d7cc0500fbf220f35044cd30eee9a7f971a7",
+    "up_ultrasharp_v2_lite": "7a330ef6b7c632477d311ac03499c91c350e35c5986d4a6c295f0628cb871a09",
+    "up_nomos_webphoto": "9be0228f98156a100d6636d99b373ed2785b999723f9adc4cca504329ab157f2",
+    "up_nomos8ksc": "d73b89267320411c7eb0ec7ab56ab17f1044f2408fed211588cee845bee48407",
+    "up_realesrgan_x4plus": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
+    "up_realesr_general_x4v3": "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+    "up_animesharp": "7fc60054d291579acac4fb537efd91c80611cbd281ef8b90f434048cc1313b39",
+    "up_realesrgan_anime6b": "f872d837d3c90ed2e05227bed711af5671a6fd1c9f7d7e91c911a61f155e99da",
+    "lama": "326ae1889b92d07c8819c35eaf561f8b290d057536eeb12524b72997f31005ec",
 }
+
+
+def downloaded(key: str) -> Path | None:
+    """An optional file the app has downloaded (checked against its pinned SHA-256 by the caller)."""
+    r = next((x for x in REMOTES if x.key == key), None)
+    if r is None:
+        return None
+    p = DOWNLOADS / f"{r.key}{Path(r.filename).suffix}"
+    return p if p.exists() else None
 
 
 def _sha256(path: Path) -> str:

@@ -1,4 +1,9 @@
-"""4x-UltraSharp ESRGAN pre-upscaler with feathered tiling (low-memory)."""
+"""4x upscalers (the pre-upscale before the AI, and INSTANT on its own) with feathered tiling (low-memory).
+
+4x-UltraSharp is built in; the others in UPSCALERS are downloaded by the app the first time they're picked (ported
+from Protoart Studio's Instant upscalers). spandrel reads each one's layout: ESRGAN, Real-ESRGAN (RRDBNet and the
+compact SRVGG), RealPLKSR and DAT.
+"""
 
 from __future__ import annotations
 
@@ -16,8 +21,24 @@ def tile_origins(h: int, w: int, tile: int, overlap: int) -> list[tuple[int, int
     return [(min(y, max(h - tile, 0)), min(x, max(w - tile, 0))) for y in ys for x in xs]
 
 
+# key -> (label, needs full precision, largest tile in input pixels or 0). DAT and RealPLKSR give wrong colours or
+# black squares in half precision (Protoart Studio), and DAT's attention makes big tiles expensive.
+UPSCALERS: dict[str, tuple[str, bool, int]] = {
+    "esrgan": ("4x-UltraSharp", False, 0),
+    "up_ultrasharp_v2": ("4x-UltraSharp V2", True, 128),
+    "up_ultrasharp_v2_lite": ("4x-UltraSharp V2 Lite", True, 0),
+    "up_nomos_webphoto": ("4xNomosWebPhoto", True, 0),
+    "up_nomos8ksc": ("4xNomos8kSC", False, 0),
+    "up_realesrgan_x4plus": ("Real-ESRGAN x4plus", False, 0),
+    "up_realesr_general_x4v3": ("Real-ESRGAN general", False, 0),
+    "up_animesharp": ("4x-AnimeSharp", False, 0),
+    "up_realesrgan_anime6b": ("Real-ESRGAN Anime 6B", False, 0),
+}
+
+
 class ESRGAN:
-    def __init__(self, path: Path, device: torch.device, dtype: torch.dtype) -> None:
+    def __init__(self, path: Path, device: torch.device, dtype: torch.dtype, fp32: bool = False,
+                 label: str = "4x-UltraSharp", max_tile: int = 0) -> None:
         from spandrel import ImageModelDescriptor, ModelLoader
 
         desc = ModelLoader(device="cpu").load_from_file(str(path))
@@ -25,8 +46,10 @@ class ESRGAN:
         assert desc.scale == 4, f"expected a 4x model, got {desc.scale}x"
         self.scale = 4
         self.device = device
-        # fp16 halves activation memory; fall back to fp32 if the arch can't do it.
-        self.dtype = dtype if (dtype == torch.float16 and desc.supports_half) else torch.float32
+        self.label = label
+        self.max_tile = max_tile
+        # fp16 halves activation memory; fall back to fp32 if the arch can't do it (or gives wrong colours in it).
+        self.dtype = dtype if (dtype == torch.float16 and desc.supports_half and not fp32) else torch.float32
         self.model = desc.model.to(device=device, dtype=self.dtype).eval()
 
     @torch.inference_mode()
@@ -35,7 +58,11 @@ class ESRGAN:
         out = self.model(t).clamp_(0, 1)
         return out.squeeze(0).permute(1, 2, 0).float().cpu().numpy()
 
+    def tile_for(self, tile: int) -> int:
+        return min(tile, self.max_tile) if self.max_tile else tile
+
     def upscale(self, image: Image.Image, tile: int = 192, overlap: int = 16, on_tile=None) -> Image.Image:
+        tile = self.tile_for(tile)
         src = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
         h, w, _ = src.shape
         s = self.scale
@@ -68,6 +95,24 @@ class ESRGAN:
         result = acc / np.maximum(wsum, 1e-6)
         return Image.fromarray((result * 255.0 + 0.5).clip(0, 255).astype(np.uint8))
 
-    def to(self, device: torch.device) -> None:
-        self.model.to(device)
+    def upscale_safe(self, image: Image.Image, tile: int = 192, overlap: int = 16, on_tile=None) -> Image.Image:
+        """upscale(), retried on the CPU if the Mac's GPU can't run one of the network's operations (or runs out of
+        GPU memory): slower, but it works (as in Protoart Studio)."""
+        try:
+            return self.upscale(image, tile=tile, overlap=overlap, on_tile=on_tile)
+        except RuntimeError as e:
+            if self.device.type == "cpu":
+                raise
+            print(f"[upscale] {self.label} on {self.device} failed ({str(e)[:200]}); retrying on the CPU", flush=True)
+            gpu, dt = self.device, self.dtype
+            self.to(torch.device("cpu"), torch.float32)
+            try:
+                return self.upscale(image, tile=tile, overlap=overlap, on_tile=on_tile)
+            finally:
+                self.to(gpu, dt)
+
+    def to(self, device: torch.device, dtype: torch.dtype | None = None) -> None:
+        if dtype is not None:
+            self.dtype = dtype
+        self.model.to(device=device, dtype=self.dtype)
         self.device = device
